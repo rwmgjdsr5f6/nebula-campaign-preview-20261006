@@ -41,6 +41,8 @@ GENERATED_NAMES = ["preview-0001.txt", "report.json"]
 EXPECTED_REPORT = {
     "template": TEMPLATE_FIXTURE,
     "segment": SEGMENT,
+    "segment_count": 1,
+    "excluded_count": 0,
     "matched_count": 1,
     "previews": [
         {"email": "a@example.invalid", "file": "preview-0001.txt"},

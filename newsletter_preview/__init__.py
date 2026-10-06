@@ -160,11 +160,12 @@ def main(argv=None):
         _prepare_out_dir(args.out)
 
         # 按原文区分大小写精确比较，不修剪值；保持 CSV 顺序，重复邮箱不合并。
-        matched = [
-            c
-            for c in contacts
-            if c["segment"] == args.segment and c["email"] not in excluded_emails
-        ]
+        # 计数均按 CSV 记录而非唯一邮箱：segment_count 为排除前的分组匹配
+        # 记录数，excluded_count 为其中被 --exclude-email 移除的记录数。
+        segment_matched = [c for c in contacts if c["segment"] == args.segment]
+        matched = [c for c in segment_matched if c["email"] not in excluded_emails]
+        segment_count = len(segment_matched)
+        excluded_count = segment_count - len(matched)
         previews = []
         for number, contact in enumerate(matched, start=1):
             filename = f"preview-{number:04d}.txt"
@@ -176,6 +177,8 @@ def main(argv=None):
         report = {
             "template": template_text,
             "segment": args.segment,
+            "segment_count": segment_count,
+            "excluded_count": excluded_count,
             "matched_count": len(matched),
             "previews": previews,
         }

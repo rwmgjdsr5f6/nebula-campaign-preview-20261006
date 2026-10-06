@@ -50,6 +50,8 @@ PREVIEW_2 = "你好，丙\n丁！\n"
 EXPECTED_REPORT = {
     "template": TEMPLATE_VALID,
     "segment": SEGMENT,
+    "segment_count": 2,
+    "excluded_count": 0,
     "matched_count": 2,
     "previews": [
         {"email": "a@example.invalid", "file": "preview-0001.txt"},
