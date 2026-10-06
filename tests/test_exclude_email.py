@@ -113,11 +113,31 @@ class ExcludeEmailTestCase(unittest.TestCase):
         with open(os.path.join(out_path, "report.json"),
                   encoding="utf-8") as fh:
             report = json.load(fh)
+        self.assertEqual(report["segment_count"], 3)
+        self.assertEqual(report["excluded_count"], 2)
         self.assertEqual(report["matched_count"], 1)
         self.assertEqual(
             report["previews"],
             [{"email": EMAIL_B, "file": "preview-0001.txt"}],
         )
+
+    def test_duplicate_exclude_value_counts_each_record_once(self):
+        # 重复传入同一排除值不重复计数：甲乙共享邮箱的两条记录各计一次
+        # 排除，excluded_count 为 2 而非 4。
+        out_path = os.path.join(self.tmp, "out-dupe")
+        result = self._run(
+            out_path,
+            ["--exclude-email", EMAIL_A, "--exclude-email", EMAIL_A],
+        )
+
+        self.assertEqual(result.returncode, 0,
+                         msg=result.stderr.decode("utf-8", "replace"))
+        with open(os.path.join(out_path, "report.json"),
+                  encoding="utf-8") as fh:
+            report = json.load(fh)
+        self.assertEqual(report["segment_count"], 3)
+        self.assertEqual(report["excluded_count"], 2)
+        self.assertEqual(report["matched_count"], 1)
 
     def test_numbering_stays_contiguous_with_interleaved_exclusions(self):
         # 被排除记录夹在保留记录之间：乙、丙保留，编号仍从 0001 连续，
@@ -145,6 +165,8 @@ class ExcludeEmailTestCase(unittest.TestCase):
         with open(os.path.join(out_path, "report.json"),
                   encoding="utf-8") as fh:
             report = json.load(fh)
+        self.assertEqual(report["segment_count"], 4)
+        self.assertEqual(report["excluded_count"], 2)
         self.assertEqual(report["matched_count"], 2)
         self.assertEqual(
             report["previews"],
@@ -155,7 +177,8 @@ class ExcludeEmailTestCase(unittest.TestCase):
         )
 
     def test_all_excluded_leaves_zero_report_only(self):
-        # 全部匹配记录被排除：退出 0，目录仅 report.json，计数 0、清单空。
+        # 全部匹配记录被排除：退出 0，目录仅 report.json，最终计数 0、
+        # 清单空；报告仍保留排除前的分组命中数与排除数。
         out_path = os.path.join(self.tmp, "out-all")
         result = self._run(
             out_path,
@@ -168,6 +191,8 @@ class ExcludeEmailTestCase(unittest.TestCase):
         with open(os.path.join(out_path, "report.json"),
                   encoding="utf-8") as fh:
             report = json.load(fh)
+        self.assertEqual(report["segment_count"], 3)
+        self.assertEqual(report["excluded_count"], 3)
         self.assertEqual(report["matched_count"], 0)
         self.assertEqual(report["previews"], [])
 
@@ -183,6 +208,8 @@ class ExcludeEmailTestCase(unittest.TestCase):
         with open(os.path.join(out_path, "report.json"),
                   encoding="utf-8") as fh:
             report = json.load(fh)
+        self.assertEqual(report["segment_count"], 3)
+        self.assertEqual(report["excluded_count"], 0)
         self.assertEqual(report["matched_count"], 3)
 
     def test_comparison_is_case_and_space_sensitive(self):
