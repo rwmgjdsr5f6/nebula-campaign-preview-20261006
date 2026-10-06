@@ -123,13 +123,31 @@ def _build_parser():
     parser.add_argument("--template", required=True, help="文字模板文件路径（UTF-8）")
     parser.add_argument("--segment", required=True, help="筛选值：segment 列的精确匹配值")
     parser.add_argument("--out", required=True, help="输出目录（不存在则创建，存在则须为空）")
+    parser.add_argument(
+        "--exclude-email",
+        action="append",
+        default=[],
+        metavar="EMAIL",
+        help="可重复：从匹配结果中排除该邮箱（精确匹配，区分大小写，不修剪空白）",
+    )
     return parser
+
+
+def _parse_exclusions(values):
+    """校验 --exclude-email 值并返回去重集合；空或仅含空白的值抛出 InputError。"""
+    excluded = set()
+    for value in values:
+        if value.strip() == "":
+            raise InputError("--exclude-email 的值不能为空或仅含空白")
+        excluded.add(value)
+    return excluded
 
 
 def main(argv=None):
     args = _build_parser().parse_args(argv)
     try:
         # 先完整校验全部输入（含未匹配行），失败时不创建任何输出。
+        excluded = _parse_exclusions(args.exclude_email)
         contacts_text = _read_text(args.contacts, "联系人 CSV")
         template_text = _read_text(args.template, "模板文件")
         contacts = _parse_contacts(contacts_text)
@@ -137,7 +155,12 @@ def main(argv=None):
         _prepare_out_dir(args.out)
 
         # 按原文区分大小写精确比较，不修剪值；保持 CSV 顺序，重复邮箱不合并。
-        matched = [c for c in contacts if c["segment"] == args.segment]
+        # 排除邮箱精确命中的记录全部移除，保留记录仍连续编号。
+        matched = [
+            c
+            for c in contacts
+            if c["segment"] == args.segment and c["email"] not in excluded
+        ]
         previews = []
         for number, contact in enumerate(matched, start=1):
             filename = f"preview-{number:04d}.txt"
