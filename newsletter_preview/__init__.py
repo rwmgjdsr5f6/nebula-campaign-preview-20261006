@@ -134,19 +134,23 @@ def _wrap_html(body):
     )
 
 
-def _build_index(segment, segment_count, excluded_count, matched, previews):
+def _build_index(segment, segment_count, excluded_count, matched, previews,
+                 excluded):
     """构建 index.html：声明 UTF-8 的完整离线索引文档。
 
     页面展示筛选值与分组命中、排除、最终预览三个记录数（与报告同
     源），清单按 CSV 顺序列出每条保留记录的原始姓名、邮箱及预览
-    链接。所有来自输入的文字（筛选值、姓名、邮箱）与计数一样先经
-    HTML 转义再写入纯文本节点或属性：中文、&、尖括号、引号及
-    {{name}} 样式文字均按字面显示，不解析为标签、实体或变量，并
-    保留大小写与首尾空白；邮箱仅作文字展示，不生成 mailto 等任何
-    非文件链接。链接 href 只写同目录预览文件名这一相对地址，输出
-    目录整体移动后仍可打开。matched 为空（零命中或全部排除）时
-    清单区域显示固定提示且不含任何预览链接。文档不引用任何网络
-    资源。
+    链接；保留清单之后是“已排除的联系人”区域，内容与顺序和报告
+    的 excluded_contacts 一致（条目数等于 excluded_count），逐条
+    显示被 --exclude-email 移除记录的原始姓名与邮箱，纯文字、不
+    含预览或邮件链接；excluded 为空时该区域显示固定提示。所有
+    来自输入的文字（筛选值、姓名、邮箱）与计数一样先经 HTML 转义
+    再写入纯文本节点或属性：中文、&、尖括号、引号及 {{name}} 样式
+    文字均按字面显示，不解析为标签、实体或变量，并保留大小写与
+    首尾空白；邮箱仅作文字展示，不生成 mailto 等任何非文件链接。
+    链接 href 只写同目录预览文件名这一相对地址，输出目录整体移动
+    后仍可打开。matched 为空（零命中或全部排除）时清单区域显示
+    固定提示且不含任何预览链接。文档不引用任何网络资源。
     """
     rows = []
     for contact, preview in zip(matched, previews):
@@ -170,6 +174,15 @@ def _build_index(segment, segment_count, excluded_count, matched, previews):
         )
     else:
         listing = "<p>没有可预览的联系人</p>"
+    if excluded:
+        items = "\n".join(
+            f"<li>{html.escape(contact['name'], quote=True)}"
+            f"（{html.escape(contact['email'], quote=True)}）</li>"
+            for contact in excluded
+        )
+        excluded_listing = f"<ul>\n{items}\n</ul>"
+    else:
+        excluded_listing = "<p>没有被排除的联系人</p>"
     return (
         "<!DOCTYPE html>\n"
         '<html lang="zh-CN">\n'
@@ -183,6 +196,8 @@ def _build_index(segment, segment_count, excluded_count, matched, previews):
         f"<p>分组命中：{segment_count}；排除：{excluded_count}；"
         f"最终预览：{len(matched)}</p>\n"
         f"{listing}\n"
+        "<h2>已排除的联系人</h2>\n"
+        f"{excluded_listing}\n"
         "</body>\n"
         "</html>\n"
     )
@@ -265,7 +280,10 @@ def _build_parser():
         action="store_true",
         help="在输出目录额外生成 index.html：按 CSV 顺序列出保留记录的"
         "原始姓名、邮箱与相对预览链接，并显示筛选值及分组命中、排除、"
-        "最终预览三个计数；省略时不生成该文件，其余产物逐字节不变",
+        "最终预览三个计数；保留清单之后附“已排除的联系人”区域，逐条"
+        "显示被 --exclude-email 移除记录的原始姓名与邮箱（纯文字，"
+        "无链接），与报告的 excluded_contacts 同序同数；省略时不生成"
+        "该文件，其余产物逐字节不变",
     )
     return parser
 
@@ -330,6 +348,7 @@ def main(argv=None):
                     excluded_count,
                     matched,
                     previews,
+                    excluded,
                 ),
             )
     except InputError as exc:
