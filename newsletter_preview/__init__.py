@@ -170,6 +170,46 @@ def _wrap_html(body):
     )
 
 
+def _contact_text_cells(contact):
+    """渲染一条联系人记录的姓名、邮箱两个纯文本单元格。
+
+    保留清单与排除清单共用：两个字段都先经 HTML 转义再写入单元格，
+    中文、&、尖括号、引号及 {{name}} 样式文字按字面显示，并保留
+    大小写与首尾空白；单元格内不放任何链接。
+    """
+    return (
+        f"<td>{html.escape(contact['name'], quote=True)}</td>"
+        f"<td>{html.escape(contact['email'], quote=True)}</td>"
+    )
+
+
+def _contact_table(header_cells, rows, empty_message):
+    """把已构造好的表格行渲染为带表头的完整表格；无行时渲染空状态。
+
+    保留清单与排除清单共用同一套表格骨架与空状态规则：header_cells
+    为表头单元格 HTML（模块内固定文案），rows 为完整 <tr> 片段；
+    rows 为空时不输出表格，改为只输出固定提示段落。所有来自输入的
+    转义由调用方在构造行时完成，此处只做拼装。
+    """
+    if not rows:
+        return f"<p>{empty_message}</p>"
+    return (
+        "<table>\n"
+        f"<thead><tr>{header_cells}</tr></thead>\n"
+        "<tbody>\n"
+        + "\n".join(rows)
+        + "\n</tbody>\n"
+        "</table>"
+    )
+
+
+# 两类清单的表头单元格与空状态均为模块内固定文案，不来自输入。
+_RETAINED_HEADERS = "<th>姓名</th><th>邮箱</th><th>预览</th>"
+_EXCLUDED_HEADERS = "<th>姓名</th><th>邮箱</th>"
+_RETAINED_EMPTY = "没有可预览的联系人"
+_EXCLUDED_EMPTY = "没有被排除的联系人"
+
+
 def _build_index(segment, segment_count, excluded_count, matched, previews,
                  excluded):
     """构建 index.html：声明 UTF-8 的完整离线索引文档。
@@ -182,59 +222,40 @@ def _build_index(segment, segment_count, excluded_count, matched, previews,
     excluded_contacts 同内容、同顺序，条目数等于 excluded_count；
     未命中分组的记录不出现，共享邮箱的每条记录各列一项，重复排除
     值不重复增加条目），每条只显示原始姓名与邮箱文字，不提供预览
-    或邮件链接；没有排除记录时显示固定空状态。所有来自输入的文字
-    （筛选值、姓名、邮箱）与计数一样先经 HTML 转义再写入纯文本
-    节点或属性：中文、&、尖括号、引号及 {{name}} 样式文字均按字面
-    显示，不解析为标签、实体或变量，并保留大小写与首尾空白；保留
-    清单中的邮箱仅作文字展示，不生成 mailto 等任何非文件链接。
+    或邮件链接；没有记录时两类清单各自显示固定空状态。两个区域的
+    姓名/邮箱单元格与表格骨架由同一组辅助函数渲染
+    （_contact_text_cells、_contact_table），区别仅在保留清单多出
+    一列预览链接。所有来自输入的文字（筛选值、姓名、邮箱、预览
+    文件名）与计数一样先经 HTML 转义再写入纯文本节点或属性：
+    中文、&、尖括号、引号及 {{name}} 样式文字均按字面显示，不解析
+    为标签、实体或变量，并保留大小写与首尾空白；保留清单中的邮箱
+    仅作文字展示，不生成 mailto 等任何非文件链接。
     链接 href 只写同目录预览文件名这一相对地址，输出目录整体移动
     后仍可打开。matched 为空（零命中或全部排除）时保留清单区域
     显示固定提示且不含任何预览链接；零命中时两个空状态同时出现。
     文档不引用任何网络资源。
     """
+    # 保留清单：共享的姓名、邮箱单元格之后追加一个同目录预览链接列。
     rows = []
     for contact, preview in zip(matched, previews):
         rows.append(
             "<tr>"
-            f"<td>{html.escape(contact['name'], quote=True)}</td>"
-            f"<td>{html.escape(contact['email'], quote=True)}</td>"
-            f'<td><a href="{html.escape(preview["file"], quote=True)}">'
+            + _contact_text_cells(contact)
+            + f'<td><a href="{html.escape(preview["file"], quote=True)}">'
             "预览</a></td>"
             "</tr>"
         )
-    if rows:
-        listing = (
-            "<table>\n"
-            "<thead><tr><th>姓名</th><th>邮箱</th><th>预览</th></tr>"
-            "</thead>\n"
-            "<tbody>\n"
-            + "\n".join(rows)
-            + "\n</tbody>\n"
-            "</table>"
-        )
-    else:
-        listing = "<p>没有可预览的联系人</p>"
+    listing = _contact_table(_RETAINED_HEADERS, rows, _RETAINED_EMPTY)
 
-    # 排除区域只放文字：两列均为纯文本单元格，无 a 元素、无 mailto。
-    excluded_rows = []
-    for contact in excluded:
-        excluded_rows.append(
-            "<tr>"
-            f"<td>{html.escape(contact['name'], quote=True)}</td>"
-            f"<td>{html.escape(contact['email'], quote=True)}</td>"
-            "</tr>"
-        )
-    if excluded_rows:
-        excluded_listing = (
-            "<table>\n"
-            "<thead><tr><th>姓名</th><th>邮箱</th></tr></thead>\n"
-            "<tbody>\n"
-            + "\n".join(excluded_rows)
-            + "\n</tbody>\n"
-            "</table>"
-        )
-    else:
-        excluded_listing = "<p>没有被排除的联系人</p>"
+    # 排除区域只放文字：复用同一组单元格与表格骨架，无链接列、无
+    # a 元素、无 mailto。
+    excluded_rows = [
+        "<tr>" + _contact_text_cells(contact) + "</tr>"
+        for contact in excluded
+    ]
+    excluded_listing = _contact_table(
+        _EXCLUDED_HEADERS, excluded_rows, _EXCLUDED_EMPTY
+    )
     return (
         "<!DOCTYPE html>\n"
         '<html lang="zh-CN">\n'
