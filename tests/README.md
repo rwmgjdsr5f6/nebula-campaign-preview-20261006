@@ -87,3 +87,26 @@ python -m unittest discover -s tests
   stderr 点名路径或 `--exclude-file` 与原因、无 Traceback；尚不存在的
   输出目录不创建，已存在的空目录保持为空。
 
+## `report.json` 创建失败（`test_report_write_failure.py`）
+
+- 固定样例：contacts.csv 表头 `name,email,segment`，甲
+  （a@example.invalid）、乙（b@example.invalid）两条 newsletter
+  记录；template.txt 正文“你好，{{name}}！”末尾一个 LF。经
+  `python -m newsletter_preview` 以筛选值 newsletter、独立临时输出
+  目录并开启 `--index` 运行，覆盖默认 text（省略 `--format`）与
+  `--format html` 两种格式。
+- 无故障对照（每种格式）：退出 0、stdout/stderr 为空；输出目录恰好
+  两份连续编号预览、`report.json` 与 `index.html`；报告分组命中、
+  排除、最终预览计数依次为 2、0、2，排除明细为空，预览清单按甲、乙
+  顺序对应邮箱与实际扩展名。
+- 故障运行（相同输入、新输出目录）：临时包装脚本在子进程内包装
+  `builtins.open`，仅对名为 `report.json` 的路径在文件创建前抛出
+  `PermissionError("report-write-denied")`，其余文件操作正常，再以
+  runpy 按公开入口语义执行。预期退出 2，stderr 点名 report.json 的
+  路径与底层原因 `report-write-denied`、无 Traceback；两份预览完整
+  保留且与同格式对照逐字节一致，`report.json` 与 `index.html` 均不
+  存在，目录无其他新增文件。
+- 故障注入仅用标准库：不需要管理员权限、不修改真实目录权限、不耗尽
+  磁盘空间、不依赖平台专用接口（无 resource/信号/chmod），Windows
+  与常见 Linux 环境均可执行，核心用例不跳过。
+
