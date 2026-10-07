@@ -3,15 +3,20 @@
 覆盖无值参数 --index 的公开约定：开启后在输出目录额外生成
 index.html，同输入、同格式下与未开启的运行逐字节一致，索引页是
 唯一新增文件；页面为声明 UTF-8 的完整 HTML 文档，显示筛选值与
-分组命中、排除、最终预览三个记录数（与 report.json 一致），清单
-按 CSV 顺序列出保留记录的原始姓名、邮箱与相对预览链接，重复邮箱
-分别列项，链接地址仅为同目录文件名，目录移动后仍可打开；中文、
-&、尖括号、引号及 {{name}} 样式文字按字面显示，保留大小写与
-首尾空白；页面无网络资源，邮箱仅为文字；零命中或全部排除时退出
-0，只有报告与索引，页面保留三个计数并显示“没有可预览的联系人”，
-无预览链接。失败语义沿用既有约定：缺列、必需字段为空、未知变量、
-输入不可读退出 2 且不创建输出；输出目录非空退出 2 且原文件保留；
-索引写入失败退出 2，标准错误点名文件与原因，已写文件允许保留。
+分组命中、排除、最终预览三个记录数（与 report.json 一致），保留
+联系人清单按 CSV 顺序列出原始姓名、邮箱与相对预览链接，重复邮箱
+分别列项，链接地址仅为同目录文件名，目录移动后仍可打开；其后的
+“已排除的联系人”区域逐条列出原始姓名与邮箱（仅文字，无预览或
+邮件链接），内容与顺序同 report.json 的 excluded_contacts，条目
+数等于 excluded_count，未命中分组的记录不出现，共享邮箱各列一项，
+重复排除值不重复增加条目，没有排除记录时显示“没有被排除的联系
+人”；中文、&、尖括号、引号及 {{name}} 样式文字按字面显示，保留
+大小写与首尾空白；页面无网络资源，邮箱仅为文字；零命中时两个空
+状态同时出现，全部排除时仍列出全部排除条目、显示“没有可预览的
+联系人”，无预览链接。失败语义沿用既有约定：缺列、必需字段为空、
+未知变量、输入不可读退出 2 且不创建输出；输出目录非空退出 2 且
+原文件保留；索引写入失败退出 2，标准错误点名文件与原因，已写
+文件允许保留。
 
 仅依赖 Python 3 标准库，完全离线；样例联系人为合成数据，邮箱使用
 RFC 2606 保留的 example.invalid 虚构域名。
@@ -55,22 +60,36 @@ EMAIL_CUT = "cut@example.invalid"
 
 
 class _IndexParser(HTMLParser):
-    """按浏览器规则解析索引页，收集单元格文本、全部文本与链接地址。
+    """按浏览器规则解析索引页，分区域收集单元格文本、全部文本与链接。
 
-    convert_charrefs=True 使数字/命名实体按解析结果还原，因此还原后
-    的文本与浏览器显示一致：&、尖括号、引号样式文字应作为字面数据
-    出现，不成标签或实体。
+    保留联系人清单位于“已排除的联系人”h2 之前；h2 之后的表格属于
+    排除区域。convert_charrefs=True 使数字/命名实体按解析结果还原，
+    因此还原后的文本与浏览器显示一致：&、尖括号、引号样式文字应作为
+    字面数据出现，不成标签或实体。
     """
+
+    EXCLUDED_HEADING = "已排除的联系人"
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.cells = []
+        self.retained_cells = []
+        self.excluded_cells = []
         self.links = []
         self.texts = []
         self._cell = None
+        self._heading = None
+        self._in_excluded = False
+        self._current_cells = None
 
     def handle_starttag(self, tag, attrs):
-        if tag == "td":
+        if tag == "h2":
+            self._heading = []
+        elif tag == "table":
+            self._current_cells = (
+                self.excluded_cells if self._in_excluded
+                else self.retained_cells
+            )
+        elif tag == "td":
             self._cell = []
         elif tag == "a":
             attrs_dict = dict(attrs)
@@ -80,11 +99,20 @@ class _IndexParser(HTMLParser):
         self.texts.append(data)
         if self._cell is not None:
             self._cell.append(data)
+        if self._heading is not None:
+            self._heading.append(data)
 
     def handle_endtag(self, tag):
-        if tag == "td" and self._cell is not None:
-            self.cells.append("".join(self._cell))
+        if tag == "h2" and self._heading is not None:
+            if "".join(self._heading) == self.EXCLUDED_HEADING:
+                self._in_excluded = True
+            self._heading = None
+        elif tag == "td" and self._cell is not None:
+            if self._current_cells is not None:
+                self._current_cells.append("".join(self._cell))
             self._cell = None
+        elif tag == "table":
+            self._current_cells = None
 
     def text(self):
         return "".join(self.texts)
@@ -108,7 +136,10 @@ class IndexPageTestCase(unittest.TestCase):
 
     def _run(self, out_path, extra_args=(), fmt="html", index=True,
              contacts_path=None, template_path=None, segment=SEGMENT):
-        """通过 README 记载的公开入口运行，返回 CompletedProcess。"""
+        """通过 README 记载的公开入口运行，返回 CompletedProcess。
+
+        fmt 为 None 时省略 --format（即默认 text 格式）。
+        """
         env = dict(os.environ)
         env["PYTHONPATH"] = PROJECT_ROOT + os.pathsep + env.get("PYTHONPATH", "")
         argv = [
@@ -123,9 +154,9 @@ class IndexPageTestCase(unittest.TestCase):
             segment,
             "--out",
             out_path,
-            "--format",
-            fmt,
         ]
+        if fmt is not None:
+            argv.extend(["--format", fmt])
         argv.extend(extra_args)
         if index:
             argv.append("--index")
@@ -186,10 +217,10 @@ class IndexPageTestCase(unittest.TestCase):
         self.assertEqual(report["excluded_count"], 1)
         self.assertEqual(report["matched_count"], 2)
 
-        # 清单按 CSV 顺序列出保留者的原始姓名与邮箱；重复邮箱分别
-        # 列项，被排除的戊不在清单内。
+        # 保留清单按 CSV 顺序列出保留者的原始姓名与邮箱；重复邮箱分别
+        # 列项，被排除的戊不在保留清单内。
         self.assertEqual(
-            parser.cells,
+            parser.retained_cells,
             [
                 "甲&乙", EMAIL_SHARED, "预览",
                 "丙<丁>", EMAIL_SHARED, "预览",
@@ -203,6 +234,20 @@ class IndexPageTestCase(unittest.TestCase):
         for filename in parser.links:
             self.assertTrue(os.path.isfile(os.path.join(out_path, filename)))
 
+        # 排除区域在保留清单之后，只含被排除的戊（逐条、仅文字、
+        # 无链接），条目数与报告 excluded_count 一致；空状态不出现。
+        self.assertIn("已排除的联系人", parser.text())
+        self.assertNotIn("没有被排除的联系人", parser.text())
+        self.assertEqual(parser.excluded_cells, ["戊", EMAIL_CUT])
+        with open(os.path.join(out_path, "report.json"),
+                  encoding="utf-8") as fh:
+            excluded_contacts = json.load(fh)["excluded_contacts"]
+        self.assertEqual(
+            parser.excluded_cells,
+            [c for item in excluded_contacts
+             for c in (item["name"], item["email"])],
+        )
+
         # & 与尖括号在原始 HTML 中必须转义，不成标签或实体；解析后
         # 按字面还原。
         self.assertIn("甲&amp;乙", raw)
@@ -215,6 +260,105 @@ class IndexPageTestCase(unittest.TestCase):
         for forbidden in ("http://", "https://", "src=", "<script",
                           "<img", "<link"):
             self.assertNotIn(forbidden, raw)
+
+    def test_default_text_acceptance_fixed_csv_excluded_region(self):
+        # 用户验收固定样例（省略 --format，即默认 text）：newsletter
+        # 分组的甲&乙、丙<丁>、戊与 archive 分组的己；甲&乙、丙<丁>、
+        # 己共用 cut@example.invalid，戊用 keep@example.invalid；模板
+        # “你好，{{name}}！”末尾一个 LF。选择 newsletter、排除
+        # cut@example.invalid 并开启 --index 后：退出 0，三人数
+        # 3、2、1；排除区域按顺序只有甲&乙和丙<丁>（archive 的己不
+        # 出现）；保留清单只有戊及 preview-0001.txt；正文为
+        # “你好，戊！”并保留末尾 LF。
+        contacts = (
+            "name,email,segment\n"
+            "甲&乙,cut@example.invalid,newsletter\n"
+            "丙<丁>,cut@example.invalid,newsletter\n"
+            "戊,keep@example.invalid,newsletter\n"
+            "己,cut@example.invalid,archive\n"
+        )
+        template = "你好，{{name}}！\n"
+        contacts_path = self._write("contacts-fixed.csv", contacts)
+        template_path = self._write("template-fixed.txt", template)
+
+        # 同一排除值重复提供两遍：去重后条目不翻倍。
+        out_path = os.path.join(self.tmp, "previews-fixed")
+        result = self._run(
+            out_path,
+            ["--exclude-email", "cut@example.invalid",
+             "--exclude-email", "cut@example.invalid"],
+            fmt=None,
+            contacts_path=contacts_path,
+            template_path=template_path,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stderr: {result.stderr.decode('utf-8', 'replace')}",
+        )
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"")
+
+        # 默认 text 格式：仅一份 .txt 预览、报告与索引。
+        self.assertEqual(
+            sorted(os.listdir(out_path)),
+            ["index.html", "preview-0001.txt", "report.json"],
+        )
+
+        with open(os.path.join(out_path, "report.json"),
+                  encoding="utf-8") as fh:
+            report = json.load(fh)
+        self.assertEqual(
+            (report["segment_count"], report["excluded_count"],
+             report["matched_count"]),
+            (3, 2, 1),
+        )
+        self.assertEqual(
+            report["excluded_contacts"],
+            [
+                {"name": "甲&乙", "email": "cut@example.invalid"},
+                {"name": "丙<丁>", "email": "cut@example.invalid"},
+            ],
+        )
+        self.assertEqual(
+            report["previews"],
+            [{"email": "keep@example.invalid", "file": "preview-0001.txt"}],
+        )
+
+        raw, parser = self._parse_index(out_path)
+        self.assertIn("分组命中：3；排除：2；最终预览：1", parser.text())
+        # 保留清单只有戊及其 .txt 相对链接。
+        self.assertEqual(
+            parser.retained_cells,
+            ["戊", "keep@example.invalid", "预览"],
+        )
+        self.assertEqual(parser.links, ["preview-0001.txt"])
+        # 排除区域按顺序只有甲&乙和丙<丁>（己属于 archive，不出现），
+        # 条数等于 excluded_count，重复排除值不翻倍。
+        self.assertEqual(
+            parser.excluded_cells,
+            [
+                "甲&乙", "cut@example.invalid",
+                "丙<丁>", "cut@example.invalid",
+            ],
+        )
+        self.assertEqual(len(parser.excluded_cells) // 2,
+                         report["excluded_count"])
+        self.assertNotIn("己", parser.text())
+        self.assertNotIn("没有被排除的联系人", parser.text())
+
+        # 排除条目只显示文字：排除表格内无链接，整个页面只有保留者
+        # 的一个文件链接，无 mailto。
+        self.assertNotIn("mailto:", raw)
+        self.assertEqual(raw.count("<a "), 1)
+
+        # 特殊字符经转义后按字面显示。
+        self.assertIn("甲&amp;乙", raw)
+        self.assertIn("丙&lt;丁&gt;", raw)
+
+        # 正文替换正确且末尾 LF 逐字节保留。
+        with open(os.path.join(out_path, "preview-0001.txt"), "rb") as fh:
+            self.assertEqual(fh.read(), "你好，戊！\n".encode("utf-8"))
 
     def test_relative_links_survive_directory_move(self):
         # 整个输出目录移动后，索引中的相对链接仍能打开对应预览。
@@ -235,7 +379,7 @@ class IndexPageTestCase(unittest.TestCase):
 
     def test_text_format_index_links_txt_previews(self):
         # text 格式同样可用：链接指向 .txt 文件；模板无末尾换行，
-        # 预览正文逐字为“你好，甲&乙！”。
+        # 预览正文逐字为“你好，甲&乙！”；排除区域两种格式一致。
         out_path = os.path.join(self.tmp, "previews-text")
         result = self._run(
             out_path,
@@ -259,6 +403,8 @@ class IndexPageTestCase(unittest.TestCase):
         )
         self.assertEqual(self._read(out_path, "preview-0001.txt"),
                          "你好，甲&乙！")
+        # 默认 text 格式的索引页同样带有排除区域，内容同 html 格式。
+        self.assertEqual(parser.excluded_cells, ["戊", EMAIL_CUT])
 
     def test_indexed_and_plain_runs_are_byte_identical_both_formats(self):
         # 开启 --index 时原有预览与 report.json 与未开启时逐字节
@@ -289,7 +435,8 @@ class IndexPageTestCase(unittest.TestCase):
 
     def test_all_excluded_shows_message_and_counts_without_links(self):
         # 全部排除时退出 0，只有报告与索引；三计数为 3、3、0，
-        # 页面显示固定提示且不含任何预览链接。
+        # 保留区域显示固定提示且不含任何预览链接；排除区域仍列出
+        # 全部三条排除记录（顺序同报告），不显示排除空状态。
         out_path = os.path.join(self.tmp, "previews-none")
         result = self._run(
             out_path,
@@ -307,12 +454,29 @@ class IndexPageTestCase(unittest.TestCase):
         raw, parser = self._parse_index(out_path)
         self.assertIn("分组命中：3；排除：3；最终预览：0", parser.text())
         self.assertIn("没有可预览的联系人", parser.text())
+        self.assertIn("已排除的联系人", parser.text())
+        self.assertNotIn("没有被排除的联系人", parser.text())
         self.assertEqual(parser.links, [])
         self.assertNotIn("<a ", raw)
         self.assertNotIn("preview-0001", raw)
+        # 三条排除记录按 CSV 顺序各列一项（共享邮箱不去重）。
+        self.assertEqual(
+            parser.excluded_cells,
+            [
+                "甲&乙", EMAIL_SHARED,
+                "丙<丁>", EMAIL_SHARED,
+                "戊", EMAIL_CUT,
+            ],
+        )
+        with open(os.path.join(out_path, "report.json"),
+                  encoding="utf-8") as fh:
+            report = json.load(fh)
+        self.assertEqual(len(parser.excluded_cells) // 2,
+                         report["excluded_count"])
 
     def test_zero_segment_match_shows_message_and_counts(self):
-        # 零命中同样退出 0：计数 0、0、0，提示出现、无链接。
+        # 零命中同样退出 0：计数 0、0、0，保留与排除两个空状态同时
+        # 出现、均无链接与条目。
         out_path = os.path.join(self.tmp, "previews-zero")
         result = self._run(out_path, segment="archive")
         self.assertEqual(
@@ -323,11 +487,15 @@ class IndexPageTestCase(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(out_path)),
                          ["index.html", "report.json"])
 
-        _, parser = self._parse_index(out_path)
+        raw, parser = self._parse_index(out_path)
         self.assertIn("筛选值：archive", parser.text())
         self.assertIn("分组命中：0；排除：0；最终预览：0", parser.text())
         self.assertIn("没有可预览的联系人", parser.text())
+        self.assertIn("没有被排除的联系人", parser.text())
         self.assertEqual(parser.links, [])
+        self.assertEqual(parser.retained_cells, [])
+        self.assertEqual(parser.excluded_cells, [])
+        self.assertNotIn("<a ", raw)
 
     def test_special_characters_quotes_braces_and_spaces_are_literal(self):
         # 姓名含双引号、单引号、尖括号、&；分组值含同样符号、

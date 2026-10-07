@@ -134,19 +134,26 @@ def _wrap_html(body):
     )
 
 
-def _build_index(segment, segment_count, excluded_count, matched, previews):
+def _build_index(segment, segment_count, excluded_count, matched, previews,
+                 excluded):
     """构建 index.html：声明 UTF-8 的完整离线索引文档。
 
     页面展示筛选值与分组命中、排除、最终预览三个记录数（与报告同
-    源），清单按 CSV 顺序列出每条保留记录的原始姓名、邮箱及预览
-    链接。所有来自输入的文字（筛选值、姓名、邮箱）与计数一样先经
-    HTML 转义再写入纯文本节点或属性：中文、&、尖括号、引号及
-    {{name}} 样式文字均按字面显示，不解析为标签、实体或变量，并
-    保留大小写与首尾空白；邮箱仅作文字展示，不生成 mailto 等任何
-    非文件链接。链接 href 只写同目录预览文件名这一相对地址，输出
-    目录整体移动后仍可打开。matched 为空（零命中或全部排除）时
-    清单区域显示固定提示且不含任何预览链接。文档不引用任何网络
-    资源。
+    源）。保留联系人清单按 CSV 顺序列出每条保留记录的原始姓名、
+    邮箱及预览链接；其后追加“已排除的联系人”区域，按 CSV 顺序逐条
+    列出命中分组后被 --exclude-email 移除的记录（与报告
+    excluded_contacts 同内容、同顺序，条目数等于 excluded_count；
+    未命中分组的记录不出现，共享邮箱的每条记录各列一项，重复排除
+    值不重复增加条目），每条只显示原始姓名与邮箱文字，不提供预览
+    或邮件链接；没有排除记录时显示固定空状态。所有来自输入的文字
+    （筛选值、姓名、邮箱）与计数一样先经 HTML 转义再写入纯文本
+    节点或属性：中文、&、尖括号、引号及 {{name}} 样式文字均按字面
+    显示，不解析为标签、实体或变量，并保留大小写与首尾空白；保留
+    清单中的邮箱仅作文字展示，不生成 mailto 等任何非文件链接。
+    链接 href 只写同目录预览文件名这一相对地址，输出目录整体移动
+    后仍可打开。matched 为空（零命中或全部排除）时保留清单区域
+    显示固定提示且不含任何预览链接；零命中时两个空状态同时出现。
+    文档不引用任何网络资源。
     """
     rows = []
     for contact, preview in zip(matched, previews):
@@ -170,6 +177,27 @@ def _build_index(segment, segment_count, excluded_count, matched, previews):
         )
     else:
         listing = "<p>没有可预览的联系人</p>"
+
+    # 排除区域只放文字：两列均为纯文本单元格，无 a 元素、无 mailto。
+    excluded_rows = []
+    for contact in excluded:
+        excluded_rows.append(
+            "<tr>"
+            f"<td>{html.escape(contact['name'], quote=True)}</td>"
+            f"<td>{html.escape(contact['email'], quote=True)}</td>"
+            "</tr>"
+        )
+    if excluded_rows:
+        excluded_listing = (
+            "<table>\n"
+            "<thead><tr><th>姓名</th><th>邮箱</th></tr></thead>\n"
+            "<tbody>\n"
+            + "\n".join(excluded_rows)
+            + "\n</tbody>\n"
+            "</table>"
+        )
+    else:
+        excluded_listing = "<p>没有被排除的联系人</p>"
     return (
         "<!DOCTYPE html>\n"
         '<html lang="zh-CN">\n'
@@ -183,6 +211,8 @@ def _build_index(segment, segment_count, excluded_count, matched, previews):
         f"<p>分组命中：{segment_count}；排除：{excluded_count}；"
         f"最终预览：{len(matched)}</p>\n"
         f"{listing}\n"
+        "<h2>已排除的联系人</h2>\n"
+        f"{excluded_listing}\n"
         "</body>\n"
         "</html>\n"
     )
@@ -263,9 +293,12 @@ def _build_parser():
     parser.add_argument(
         "--index",
         action="store_true",
-        help="在输出目录额外生成 index.html：按 CSV 顺序列出保留记录的"
-        "原始姓名、邮箱与相对预览链接，并显示筛选值及分组命中、排除、"
-        "最终预览三个计数；省略时不生成该文件，其余产物逐字节不变",
+        help="在输出目录额外生成 index.html：先按 CSV 顺序列出保留记录"
+        "的原始姓名、邮箱与相对预览链接，再以内容、顺序与报告 "
+        "excluded_contacts 一致的“已排除的联系人”区域逐条列出被排除"
+        "记录（仅文字，无预览或邮件链接，无排除记录时显示空状态），"
+        "并显示筛选值及分组命中、排除、最终预览三个计数；省略时不"
+        "生成该文件，其余产物逐字节不变",
     )
     return parser
 
@@ -330,6 +363,7 @@ def main(argv=None):
                     excluded_count,
                     matched,
                     previews,
+                    excluded,
                 ),
             )
     except InputError as exc:
