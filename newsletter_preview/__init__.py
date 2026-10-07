@@ -49,6 +49,42 @@ def _read_text(path, description, strip_bom=False):
     return text
 
 
+def _parse_exclude_list(text):
+    """解析 --exclude-file 名单文本，返回邮箱原文列表（保持文件顺序）。
+
+    文件无表头、UTF-8：仅支持 LF 与 CRLF 两种行结束，末行允许没有换行。
+    按 LF 切分后，每行至多移除一个行结束符（CRLF 的 CR、LF 本身作为
+    切分符已消失）；单独出现的 CR 不是行结束，按正文保留。切分末尾由
+    终止换行产生的空串只是行结束符的副产物，不当作一行；其余空行及仅
+    含空白的行忽略。非空白行除行结束符外逐字保留：区分大小写、不修剪
+    首尾空白。空文件视为空名单；名单文件不做 BOM 处理，开头的 U+FEFF
+    属于正文。
+    """
+    lines = text.split("\n")
+    # 末尾换行在 split 后产生一个空串，它只是行结束符的副产物而非一行；
+    # 空文件同样切出单个空串，丢弃后即为空名单。该空串存在还意味着倒数
+    # 第二段原本后面紧跟 LF——其末尾的 CR 属于 CRLF，需要一并移除。
+    terminated_by_lf = bool(lines) and lines[-1] == ""
+    if terminated_by_lf:
+        lines.pop()
+    emails = []
+    last_index = len(lines) - 1
+    for index, line in enumerate(lines):
+        # 只有后面紧跟 LF 的 CR 才属于 CRLF；末行孤立的 CR 是正文，保留。
+        if (index < last_index or terminated_by_lf) and line.endswith("\r"):
+            line = line[:-1]
+        if line.strip() == "":
+            continue
+        emails.append(line)
+    return emails
+
+
+def _read_exclude_list(path):
+    """读取并解析 --exclude-file 名单；无法读取或解码时抛出 InputError。"""
+    text = _read_text(path, "排除名单文件")
+    return _parse_exclude_list(text)
+
+
 def _parse_contacts(text):
     """解析并完整校验联系人 CSV（含未匹配行），返回记录列表。"""
     reader = csv.reader(io.StringIO(text))
@@ -141,7 +177,8 @@ def _build_index(segment, segment_count, excluded_count, matched, previews,
     页面展示筛选值与分组命中、排除、最终预览三个记录数（与报告同
     源）。保留联系人清单按 CSV 顺序列出每条保留记录的原始姓名、
     邮箱及预览链接；其后追加“已排除的联系人”区域，按 CSV 顺序逐条
-    列出命中分组后被 --exclude-email 移除的记录（与报告
+    列出命中分组后被排除名单（--exclude-email / --exclude-file）移除
+    的记录（与报告
     excluded_contacts 同内容、同顺序，条目数等于 excluded_count；
     未命中分组的记录不出现，共享邮箱的每条记录各列一项，重复排除
     值不重复增加条目），每条只显示原始姓名与邮箱文字，不提供预览
@@ -251,15 +288,19 @@ def _write_file(path, content):
         raise InputError(f"无法写入输出文件：{path}：{exc}")
 
 
-def _normalize_excludes(values):
-    """校验并收集 --exclude-email 的值，返回去重后的原值集合。
+def _normalize_excludes(cli_values, file_values):
+    """校验并合并 --exclude-email 与 --exclude-file 的值，返回去重后的原值集合。
 
-    保留原文：区分大小写、不去除两端空白；重复值不叠加效果。空字符串
-    或仅含空白属于参数错误（InputError，退出 2）。
+    保留原文：区分大小写、不去除两端空白；同一值无论来自命令行还是文件、
+    出现几次，都只生效一次（重复值不叠加计数）。命令行的空字符串或仅含
+    空白属于参数错误（InputError，退出 2）；名单文件中的空行或仅含空白
+    行在解析阶段已忽略，不会进入这里。
     """
+    values = list(cli_values or ())
+    values.extend(file_values or ())
     if not values:
         return frozenset()
-    for value in values:
+    for value in cli_values or ():
         if value.strip() == "":
             raise InputError("--exclude-email 的值不能为空字符串或仅含空白")
     return frozenset(values)
@@ -284,6 +325,15 @@ def _build_parser():
         "（区分大小写、不修剪空白）；可重复提供以排除多个邮箱",
     )
     parser.add_argument(
+        "--exclude-file",
+        metavar="FILE",
+        default=None,
+        help="从 UTF-8 本地名单文件追加排除邮箱（无表头，每行一个）："
+        "支持 LF 与 CRLF 行结束及末行无换行；空行及仅含空白的行忽略，"
+        "其余行只移除行结束符，保留大小写与首尾空白；空文件视为空名单。"
+        "名单与 --exclude-email 合并后按邮箱原文精确匹配，重复值不叠加",
+    )
+    parser.add_argument(
         "--format",
         choices=OUTPUT_FORMATS,
         default="text",
@@ -306,8 +356,15 @@ def _build_parser():
 def main(argv=None):
     args = _build_parser().parse_args(argv)
     try:
-        # 先完整校验全部输入（含未匹配行），失败时不创建任何输出。
-        excluded_emails = _normalize_excludes(args.exclude_email)
+        # 先完整校验全部输入（含未匹配行、名单文件），失败时不创建任何输出。
+        file_excludes = (
+            _read_exclude_list(args.exclude_file)
+            if args.exclude_file is not None
+            else []
+        )
+        excluded_emails = _normalize_excludes(
+            args.exclude_email, file_excludes
+        )
         contacts_text = _read_text(args.contacts, "联系人 CSV", strip_bom=True)
         template_text = _read_text(args.template, "模板文件")
         contacts = _parse_contacts(contacts_text)
@@ -319,8 +376,9 @@ def main(argv=None):
         # 各计一次命中，被排除时排除数同样逐条累加。
         segment_matched = [c for c in contacts if c["segment"] == args.segment]
         matched = [c for c in segment_matched if c["email"] not in excluded_emails]
-        # 排除明细：分组命中后被 --exclude-email 移除的记录，按 CSV 顺序逐条
-        # 收录（共享邮箱的每条命中各列一项，重复项保留），仅存原始姓名与邮箱。
+        # 排除明细：分组命中后被命令行/名单文件排除值移除的记录，按 CSV
+        # 顺序逐条收录（共享邮箱的每条命中各列一项，重复项保留），仅存
+        # 原始姓名与邮箱。
         excluded = [c for c in segment_matched if c["email"] in excluded_emails]
         segment_count = len(segment_matched)
         excluded_count = len(excluded)
