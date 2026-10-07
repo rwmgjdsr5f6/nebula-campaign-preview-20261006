@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import io
 import json
 import os
@@ -15,6 +16,7 @@ import sys
 
 REQUIRED_COLUMNS = ("name", "email", "segment")
 KNOWN_PLACEHOLDERS = ("name", "email", "segment")
+OUTPUT_FORMATS = ("text", "html")
 # 完整双花括号占位符，如 {{name}}；不完整的（如单个 { 或未闭合）按普通文字处理。
 PLACEHOLDER_RE = re.compile(r"\{\{([^{}]*)\}\}")
 # UTF-8 BOM（字节 EF BB BF）解码后的字符。仅联系人 CSV 文件开头的一个
@@ -103,6 +105,35 @@ def _render(template, record):
     return PLACEHOLDER_RE.sub(lambda match: record[match.group(1)], template)
 
 
+def _wrap_html(body):
+    """把替换后的正文包成声明 UTF-8 的完整 HTML 文档。
+
+    正文放在唯一的 pre 元素中整体转义：模板与字段值中的 &、<、>、标签
+    及实体样式文字均按字面显示，不会成为页面元素；正文在替换阶段已定型，
+    这里不再次解析任何内容，不引用任何网络资源。中文、空格、空行与末尾
+    换行随 UTF-8 字节与 pre 的预排版原样保留；仅正文开头的 LF 例外——
+    HTML 解析会吞掉紧跟 pre 起始标签后的一个换行，故把该首字符写成数字
+    字符引用 &#10;（浏览器显示与 HTML 实体解析结果仍是同一个 LF）。
+    """
+    escaped = html.escape(body, quote=False)
+    # CRLF 同为一个紧跟标签的行终止符，一并保护其首字符。
+    if escaped[:1] in ("\n", "\r"):
+        first = "&#10;" if escaped[0] == "\n" else "&#13;"
+        escaped = first + escaped[1:]
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="zh-CN">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        "<title>newsletter preview</title>\n"
+        "</head>\n"
+        "<body>\n"
+        f"<pre>{escaped}</pre>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
 def _prepare_out_dir(path):
     """输出目录不存在时创建；存在时要求为空目录且可写。不覆盖已有文件。"""
     if os.path.exists(path):
@@ -168,6 +199,13 @@ def _build_parser():
         help="排除邮箱：从匹配记录中移除 email 与之完全相同的记录"
         "（区分大小写、不修剪空白）；可重复提供以排除多个邮箱",
     )
+    parser.add_argument(
+        "--format",
+        choices=OUTPUT_FORMATS,
+        default="text",
+        help="逐人预览格式：text（默认，.txt 文本）或 html"
+        "（完整 UTF-8 HTML 文档，正文在 pre 中按字面显示，.html）",
+    )
     return parser
 
 
@@ -193,10 +231,15 @@ def main(argv=None):
         segment_count = len(segment_matched)
         excluded_count = len(excluded)
         previews = []
+        extension = "html" if args.format == "html" else "txt"
         for number, contact in enumerate(matched, start=1):
-            filename = f"preview-{number:04d}.txt"
+            filename = f"preview-{number:04d}.{extension}"
             # 单次扫描替换，替换值不再次解析；其余文字与换行原样保留。
             content = _render(template_text, contact)
+            # html 模式仅在写出前包一层完整文档，正文内容不变；
+            # text 模式逐字写出，与既有版本逐字节一致。
+            if args.format == "html":
+                content = _wrap_html(content)
             _write_file(os.path.join(args.out, filename), content)
             previews.append({"email": contact["email"], "file": filename})
 

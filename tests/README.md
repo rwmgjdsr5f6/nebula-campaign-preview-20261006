@@ -35,9 +35,22 @@ python -m unittest discover -s tests
 所有断言针对真实子进程的退出码、stderr 与落盘内容，不直接调用内部函数。
 每个样例使用独立临时目录，结束后自动清理，不改动项目中的已有文件。
 
-## 联系人 CSV 的起始 BOM 兼容（`test_contacts_bom.py`）
+## `--format text/html` 输出格式（`test_format_html.py`）
 
-- 同一份联系人数据，一份为普通 UTF-8、一份以 EF BB BF 三个字节开头，
+- 省略 `--format` 与显式 `--format text` 的全部产物逐字节一致，均为
+  `preview-0001.txt` 起连续编号的文本预览与 `report.json`。
+- `--format html` 时逐人预览为 `preview-0001.html` 起连续编号，目录中
+  只有 HTML 文件与 `report.json`（无文本副本）；HTML 声明 UTF-8、不引用
+  网络资源，正文在唯一 `pre` 元素内按字面显示（以 `html.parser` 按浏览器
+  实体规则还原后与替换正文逐字比较）：模板与字段值中的 `&`、`<`、`>`、
+  标签及实体样式文字均不成其为页面元素，中文、空格、空行、正文开头与末尾
+  换行保留；报告 `template` 保留原文、计数与顺序不变，`previews` 清单的
+  `file` 改为 `.html` 文件名。零命中仍退出 0 且只生成报告。
+- `--format` 取值非法或缺值退出 2，stderr 点名 `--format`、无 Traceback、
+  不创建输出；html 模式下未知变量、缺列、输入不可读同样退出 2（新目录不
+  创建、已有空目录保持为空）；非空输出目录被拒绝且原内容保留。
+
+## 联系人 CSV 的起始 BOM 兼容（`test_contacts_bom.py`）- 同一份联系人数据，一份为普通 UTF-8、一份以 EF BB BF 三个字节开头，
   分别输出到独立空目录：两次均退出 0，只生成 `preview-0001.txt` 与
   `report.json`，且两份输出逐字节一致；报告中 `segment_count` 为 2、
   `excluded_count` 为 1、`matched_count` 为 1，排除明细只有乙，预览

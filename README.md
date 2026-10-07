@@ -10,8 +10,11 @@
 python -m newsletter_preview --contacts contacts.csv --template template.txt --segment newsletter --out previews
 ```
 
+- 可选的 `--format` 选择逐人预览格式，仅接受 `text` 与 `html`，省略时为 `text`：`text`（显式给出或省略）保持上述文本预览，输出与既有版本逐字节一致；`html` 时逐人预览改名为 `preview-0001.html` 起连续编号（不生成 `.txt` 副本，目录中只有这些 HTML 文件和 `report.json`），报告 `previews` 清单中的 `file` 同步改为实际 HTML 文件名，其余结构、计数、邮箱与顺序含义不变。
+- HTML 预览是声明 UTF-8（`<meta charset="utf-8">`）的完整文档，正文用一个 `pre` 元素展示，不引用任何网络资源。变量仍按既有规则替换、字段值不再次解析；模板与字段值中的 `&`、`<`、`>`、标签及实体样式文字均按字面显示（HTML 转义），不会成为页面元素；中文、空格、空行以及正文开头和末尾的换行都保留。
+
 - CSV 为 UTF-8：文件开头、首行之前允许带一个 UTF-8 BOM（字节 EF BB BF），该标记仅作编码声明，读取时忽略，带与不带 BOM 的同一文件结果完全一致；仅文件开头的一个 BOM 享受此处理，字段内部的 U+FEFF 属于正文，原样保留且不修剪。首行表头须含 `name`、`email`、`segment`（列顺序不限，额外列忽略）。模板文件不做 BOM 处理，其内容（含任何位置的 U+FEFF）均按正文原样保留。
 - 模板仅支持 `{{name}}`、`{{email}}` 与 `{{segment}}` 变量（可混合或重复出现，取当前记录的原始字段值，`{{segment}}` 为该记录 segment 列的原文、保留大小写与首尾空白；替换值不再次解析）；其他 `{{...}}` 占位符视为未知变量。
 - 可选的 `--exclude-email` 可重复提供，每次一个邮箱：匹配记录中 `email` 与任一排除值完全相同（区分大小写、不修剪空白）的记录将被移除；共享邮箱的匹配记录全部排除，其他重复邮箱各自保留。排除值为空或仅含空白时退出 2。
-- 输出目录不存在时创建，存在时须为空；逐人预览按保留记录的 CSV 顺序命名为 `preview-0001.txt` 起连续编号（不因排除留空号），另生成 `report.json`（含模板原文、筛选值、排除前的分组命中记录数 `segment_count`、因 `--exclude-email` 被移除的记录数 `excluded_count`、被移除记录的明细 `excluded_contacts`（按 CSV 顺序逐项列出原始 `name` 与 `email`，共享邮箱的每条命中各列一项）、最终预览人数 `matched_count` 与预览清单；计数均按 CSV 数据记录统计，不按唯一邮箱）。
+- 输出目录不存在时创建，存在时须为空；逐人预览按保留记录的 CSV 顺序自 `preview-0001` 起连续编号（扩展名随 `--format`：text 为 `.txt`、html 为 `.html`，不因排除留空号），另生成 `report.json`（含模板原文、筛选值、排除前的分组命中记录数 `segment_count`、因 `--exclude-email` 被移除的记录数 `excluded_count`、被移除记录的明细 `excluded_contacts`（按 CSV 顺序逐项列出原始 `name` 与 `email`，共享邮箱的每条命中各列一项）、最终预览人数 `matched_count` 与预览清单；计数均按 CSV 数据记录统计，不按唯一邮箱）。
 - 成功退出 0；输入校验失败、输入不可读、参数不合法或输出目录非空/不可写时退出 2，且不创建任何输出。
