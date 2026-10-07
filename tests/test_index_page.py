@@ -32,9 +32,7 @@ RFC 2606 保留的 example.invalid 虚构域名。
 
 import json
 import os
-import resource
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -43,6 +41,33 @@ from html.parser import HTMLParser
 
 # 项目根目录（本文件位于 <root>/tests/ 下），同时作为子进程工作目录。
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# 索引写入失败注入包装脚本源码：在子进程内把对 index.html 的写入打开
+# 替换为 PermissionError("index-write-denied")（在创建文件之前抛出，
+# 不触碰磁盘），随后以 __main__ 方式运行真实的 newsletter_preview
+# 模块。仅使用标准库，不依赖 RLIMIT_FSIZE、SIGXFSZ、权限变更或管理员
+# 权限，Windows 与 Linux 的标准 Python 3 均可执行。
+DENY_INDEX_WRITE_WRAPPER = '''
+import builtins
+import os
+import runpy
+import sys
+
+_real_open = builtins.open
+
+
+def _guarded_open(file, mode="r", *args, **kwargs):
+    if (isinstance(file, (str, bytes, os.PathLike))
+            and os.path.basename(os.fspath(file)) == "index.html"
+            and any(flag in mode for flag in "wxa+")):
+        raise PermissionError("index-write-denied")
+    return _real_open(file, mode, *args, **kwargs)
+
+
+builtins.open = _guarded_open
+sys.argv = ["newsletter_preview"] + sys.argv[1:]
+runpy.run_module("newsletter_preview", run_name="__main__")
+'''.lstrip()
 
 # 验收固定样例：前两人共享 shared@example.invalid，戊为
 # cut@example.invalid；姓名内含 & 与尖括号。
@@ -135,17 +160,17 @@ class IndexPageTestCase(unittest.TestCase):
         return path
 
     def _run(self, out_path, extra_args=(), fmt="html", index=True,
-             contacts_path=None, template_path=None, segment=SEGMENT):
+             contacts_path=None, template_path=None, segment=SEGMENT,
+             wrapper=None):
         """通过 README 记载的公开入口运行，返回 CompletedProcess。
 
-        fmt 为 None 时省略 --format（即默认 text 格式）。
+        fmt 为 None 时省略 --format（即默认 text 格式）。wrapper 给出
+        包装脚本路径时，子进程改为运行该脚本、由脚本以 __main__ 方式
+        加载同一模块（模块参数原样跟在脚本路径之后）。
         """
         env = dict(os.environ)
         env["PYTHONPATH"] = PROJECT_ROOT + os.pathsep + env.get("PYTHONPATH", "")
-        argv = [
-            sys.executable,
-            "-m",
-            "newsletter_preview",
+        module_args = [
             "--contacts",
             contacts_path or self.contacts_path,
             "--template",
@@ -156,10 +181,14 @@ class IndexPageTestCase(unittest.TestCase):
             out_path,
         ]
         if fmt is not None:
-            argv.extend(["--format", fmt])
-        argv.extend(extra_args)
+            module_args.extend(["--format", fmt])
+        module_args.extend(extra_args)
         if index:
-            argv.append("--index")
+            module_args.append("--index")
+        if wrapper is None:
+            argv = [sys.executable, "-m", "newsletter_preview"] + module_args
+        else:
+            argv = [sys.executable, wrapper] + module_args
         return subprocess.run(
             argv,
             cwd=PROJECT_ROOT,
@@ -642,87 +671,114 @@ class IndexPageTestCase(unittest.TestCase):
             self.assertEqual(fh.read(), keep_bytes)
 
     def test_index_write_failure_exits_2_names_file_keeps_written(self):
-        # 用 RLIMIT_FSIZE 把单文件大小上限恰好设为 report.json 的
-        # 字节数：预览与报告都能写完，index.html 首次写入即失败。
-        # 预期退出 2、stderr 点名 index.html 与底层原因、无
-        # Traceback；已写文件允许保留。
-        if not hasattr(resource, "RLIMIT_FSIZE"):
-            self.skipTest("当前平台不支持 RLIMIT_FSIZE")
-
-        control = os.path.join(self.tmp, "control")
-        result = self._run(
-            control,
-            fmt="text",
-            index=False,
-            contacts_path=self._write(
-                "c-simple.csv",
-                "name,email,segment\n甲,a@example.invalid,newsletter\n",
-            ),
-            template_path=self._write("t-simple.txt", "你好，{{name}}！"),
+        # 跨平台故障注入：包装脚本在子进程内把对 index.html 的写入打开
+        # 替换为 PermissionError("index-write-denied")（在创建文件之前
+        # 抛出），不依赖 RLIMIT_FSIZE、SIGXFSZ、权限变更、资源耗尽或
+        # 管理员权限，Windows 与 Linux 的标准 Python 3 同样执行。
+        # 默认 text 与 --format html 各自验证：同输入、同格式的无故障
+        # 运行作为对照；故障运行退出 2、stdout 为空、stderr 点名
+        # index.html 完整目标路径与底层原因、无 Traceback；故障目录
+        # 恰好保留逐人预览与 report.json，两者与对照逐字节一致，
+        # index.html 不存在。
+        contacts_path = self._write(
+            "c-single.csv",
+            "name,email,segment\n甲,a@example.invalid,newsletter\n",
         )
-        self.assertEqual(result.returncode, 0)
-        limit = os.path.getsize(os.path.join(control, "report.json"))
+        template_path = self._write("t-single.txt", "你好，{{name}}！\n")
 
-        wrapper = os.path.join(self.tmp, "fsize_wrapper.py")
+        wrapper = os.path.join(self.tmp, "deny_index_write.py")
         with open(wrapper, "w", encoding="utf-8") as fh:
-            fh.write(
-                "import os, resource, signal, sys\n"
-                "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
-                "resource.setrlimit(resource.RLIMIT_FSIZE,\n"
-                "                  (int(sys.argv[1]), resource.RLIM_INFINITY))\n"
-                "os.execv(sys.executable,\n"
-                "         [sys.executable, '-m', 'newsletter_preview']\n"
-                "         + sys.argv[2:])\n"
-            )
+            fh.write(DENY_INDEX_WRITE_WRAPPER)
 
-        out_path = os.path.join(self.tmp, "previews-partial")
-        env = dict(os.environ)
-        env["PYTHONPATH"] = PROJECT_ROOT + os.pathsep + env.get("PYTHONPATH", "")
-        result = subprocess.run(
-            [
-                sys.executable,
-                wrapper,
-                str(limit),
-                "--contacts",
-                os.path.join(self.tmp, "c-simple.csv"),
-                "--template",
-                os.path.join(self.tmp, "t-simple.txt"),
-                "--segment",
-                SEGMENT,
-                "--out",
-                out_path,
-                "--format",
-                "text",
-                "--index",
-            ],
-            cwd=PROJECT_ROOT,
-            env=env,
-            capture_output=True,
-        )
+        for fmt, extension in ((None, "txt"), ("html", "html")):
+            with self.subTest(fmt=fmt or "text"):
+                preview_name = f"preview-0001.{extension}"
 
-        self.assertEqual(
-            result.returncode,
-            2,
-            msg=f"stderr: {result.stderr.decode('utf-8', 'replace')}",
-        )
-        stderr = result.stderr.decode("utf-8")
-        self.assertIn("无法写入输出文件", stderr)
-        self.assertIn("index.html", stderr)
-        # 底层原因必须透传（文件过大）。
-        self.assertIn("File too large", stderr)
-        self.assertNotIn("Traceback (most recent call last)", stderr)
+                # 对照：同输入、同格式、独立空目录的无故障运行。
+                control = os.path.join(self.tmp, f"ok-{extension}")
+                os.mkdir(control)
+                result = self._run(
+                    control,
+                    fmt=fmt,
+                    contacts_path=contacts_path,
+                    template_path=template_path,
+                )
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    msg=f"stderr: {result.stderr.decode('utf-8', 'replace')}",
+                )
+                self.assertEqual(result.stdout, b"")
+                self.assertEqual(result.stderr, b"")
+                self.assertEqual(
+                    sorted(os.listdir(control)),
+                    ["index.html", preview_name, "report.json"],
+                )
+                with open(os.path.join(control, "report.json"),
+                          encoding="utf-8") as fh:
+                    report = json.load(fh)
+                self.assertEqual(
+                    (
+                        report["segment_count"],
+                        report["excluded_count"],
+                        report["matched_count"],
+                    ),
+                    (1, 0, 1),
+                )
+                # 预览正文准确替换姓名并保留末尾换行。
+                if fmt is None:
+                    with open(os.path.join(control, preview_name),
+                              "rb") as fh:
+                        self.assertEqual(
+                            fh.read(), "你好，甲！\n".encode("utf-8")
+                        )
+                else:
+                    self.assertIn(
+                        "你好，甲！\n", self._read(control, preview_name)
+                    )
 
-        # 已写文件允许保留：预览与报告存在且字节完整。
-        self.assertTrue(
-            os.path.isfile(os.path.join(out_path, "preview-0001.txt"))
-        )
-        with open(os.path.join(out_path, "report.json"),
-                  encoding="utf-8") as fh:
-            report = json.load(fh)
-        self.assertEqual(report["matched_count"], 1)
-        with open(os.path.join(out_path, "preview-0001.txt"),
-                  encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), "你好，甲！")
+                # 故障运行：仅 index.html 的写入被拒绝，其余步骤照常。
+                out_path = os.path.join(self.tmp, f"denied-{extension}")
+                os.mkdir(out_path)
+                result = self._run(
+                    out_path,
+                    fmt=fmt,
+                    contacts_path=contacts_path,
+                    template_path=template_path,
+                    wrapper=wrapper,
+                )
+                self.assertEqual(
+                    result.returncode,
+                    2,
+                    msg=f"stderr: {result.stderr.decode('utf-8', 'replace')}",
+                )
+                self.assertEqual(result.stdout, b"")
+                stderr = result.stderr.decode("utf-8")
+                self.assertIn("无法写入输出文件", stderr)
+                # 完整目标路径与底层原因都必须点名。
+                index_path = os.path.join(out_path, "index.html")
+                self.assertIn(index_path, stderr)
+                self.assertIn("index-write-denied", stderr)
+                self.assertNotIn("Traceback (most recent call last)", stderr)
+
+                # 故障目录恰好保留逐人预览与报告，index.html 不存在。
+                self.assertEqual(
+                    sorted(os.listdir(out_path)),
+                    [preview_name, "report.json"],
+                )
+                self.assertFalse(os.path.exists(index_path))
+                # 已写文件与无故障对照逐字节一致。
+                for name in (preview_name, "report.json"):
+                    with open(os.path.join(control, name), "rb") as fh:
+                        control_bytes = fh.read()
+                    with open(os.path.join(out_path, name), "rb") as fh:
+                        denied_bytes = fh.read()
+                    self.assertEqual(
+                        control_bytes,
+                        denied_bytes,
+                        msg=f"{fmt or 'text'} 格式下 {name} "
+                        "因索引写入失败发生字节变化",
+                    )
 
 
 if __name__ == "__main__":
