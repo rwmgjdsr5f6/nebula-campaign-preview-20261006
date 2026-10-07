@@ -170,25 +170,54 @@ def _wrap_html(body):
     )
 
 
+# 索引页中需要按原文保留空格的元素共用的类名：筛选值段落与两类
+# 联系人清单的姓名、邮箱单元格带此类（表头与“预览”链接单元格不带）。
+INDEX_FIELD_CLASS = "field-value"
+
+
 def _esc(value):
     """转义进入索引页的单条输入文字（姓名、邮箱、预览文件名等）。
 
     quote=True 同时转义引号：无论落在纯文本节点还是 href 属性中，
     中文、&、尖括号、引号及 {{name}} 样式文字均按字面显示，不解析
-    为标签、实体或变量，并保留大小写与首尾空白。
+    为标签、实体或变量，并保留大小写与首尾空白。空格不做任何替换
+    （不修剪、不写 &nbsp; 等标记），仍是原 U+0020 字符；其在浏览器
+    排版中的保留由 _index_style_block 的预排版样式保证。
     """
     return html.escape(value, quote=True)
+
+
+def _index_style_block():
+    """索引页 <head> 内的本地样式块：只声明字段文字的预排版规则。
+
+    white-space: pre-wrap 让普通空格 U+0020 与 pre 元素一样不参与
+    排版折叠：元素首尾以及内部的连续空格都按原数量显示，长字段仍可
+    自动换行。规则仅作用于带 INDEX_FIELD_CLASS 类的元素（筛选值段落、
+    两类清单的姓名与邮箱单元格），表头与“预览”链接单元格维持普通
+    排版。样式随页面内联、不引用任何网络资源；空格保留只靠该 CSS
+    规则，输入不修剪，也不替换为 &nbsp; 等可见标记。
+    """
+    return (
+        "<style>\n"
+        f".{INDEX_FIELD_CLASS} {{ white-space: pre-wrap; }}\n"
+        "</style>\n"
+    )
 
 
 def _index_contact_row(cells, link=None):
     """构建清单中的一条 <tr>：姓名、邮箱单元格共用，可选第三列链接。
 
     cells 为已按 CSV 顺序取好的单元格原文序列（保留清单为姓名、
-    邮箱，排除清单同为姓名、邮箱）；逐格转义后包成纯文本单元格。
+    邮箱，排除清单同为姓名、邮箱）；逐格转义后包成纯文本单元格，
+    并带上预排版类，使姓名、邮箱的首尾及连续空格按原数量显示。
     link 给定时（仅保留清单）追加同目录预览文件名的相对链接单元
-    格，文件名同样转义；排除清单不传，故无 a 元素、无 mailto。
+    格，文件名同样转义；该单元格维持普通排版、不带预排版类。排除
+    清单不传，故无 a 元素、无 mailto。
     """
-    row = "".join(f"<td>{_esc(cell)}</td>" for cell in cells)
+    row = "".join(
+        f'<td class="{INDEX_FIELD_CLASS}">{_esc(cell)}</td>'
+        for cell in cells
+    )
     if link is not None:
         row += f'<td><a href="{_esc(link)}">预览</a></td>'
     return f"<tr>{row}</tr>"
@@ -231,7 +260,12 @@ def _build_index(segment, segment_count, excluded_count, matched, previews,
     与 _index_contact_table 统一承担，两类清单不再各自维护同一套
     呈现逻辑；它们的差异只在调用处声明：保留清单多一个“预览”表
     头并传入同目录预览文件名作为第三列相对链接，排除清单不传链
-    接。保留清单中的邮箱仅作文字展示，不生成 mailto 等任何非文件
+    接。筛选值段落与两类清单的姓名、邮箱单元格带预排版类，配合
+    head 中的本地样式块（white-space: pre-wrap，见
+    _index_style_block）在浏览器排版中按原数量保留首尾与连续的
+    普通空格 U+0020；空格不修剪、不替换为 &nbsp; 等可见标记，
+    表头与“预览”链接单元格维持普通排版。保留清单中的邮箱仅作
+    文字展示，不生成 mailto 等任何非文件
     链接；链接 href 只写同目录预览文件名，输出目录整体移动后仍可
     打开。matched 为空（零命中或全部排除）时保留清单区域显示固定
     提示且不含任何预览链接；零命中时两个空状态同时出现。文档不
@@ -267,10 +301,11 @@ def _build_index(segment, segment_count, excluded_count, matched, previews,
         "<head>\n"
         '<meta charset="utf-8">\n'
         "<title>newsletter preview index</title>\n"
+        f"{_index_style_block()}"
         "</head>\n"
         "<body>\n"
         "<h1>预览索引</h1>\n"
-        f"<p>筛选值：{_esc(segment)}</p>\n"
+        f'<p class="{INDEX_FIELD_CLASS}">筛选值：{_esc(segment)}</p>\n'
         f"<p>分组命中：{segment_count}；排除：{excluded_count}；"
         f"最终预览：{len(matched)}</p>\n"
         f"{listing}\n"

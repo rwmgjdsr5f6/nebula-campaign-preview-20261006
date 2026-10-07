@@ -35,6 +35,7 @@ index.html 目标路径在创建前抛出 PermissionError，其余调用原样�
 调用内部函数。每个样例使用独立临时目录，结束后自动清理。
 """
 
+import html
 import json
 import os
 import shutil
@@ -66,6 +67,24 @@ SIMPLE_CONTACTS = (
     "name,email,segment\n甲,a@example.invalid,newsletter\n"
 )
 SIMPLE_TEMPLATE = "你好，{{name}}！\n"
+
+# 空格保留验收的固定合成输入：CSV 引号仅标示字段边界，不属于值；
+# 字段首尾与内部的普通空格 U+0020 必须按原数量在浏览器实际排版中
+# 保留（不折叠、不修剪、不替换为可见标记）。两条记录同属分组
+# “ news  letter ”；第二条的邮箱带首尾空格，将以同样带空格的原文
+# 作为 --exclude-email 精确排除。
+SPACE_CONTACTS = (
+    "name,email,segment\n"
+    '" 甲  &乙 "," a@example.invalid "," news  letter "\n'
+    '" 丙  丁 "," b@example.invalid "," news  letter "\n'
+)
+SPACE_TEMPLATE = "你好，{{name}}！\n"
+SPACE_SEGMENT = " news  letter "
+SPACE_EXCLUDE_EMAIL = " b@example.invalid "
+SPACE_NAME_KEPT = " 甲  &乙 "
+SPACE_EMAIL_KEPT = " a@example.invalid "
+SPACE_NAME_EXCLUDED = " 丙  丁 "
+SPACE_EMAIL_EXCLUDED = " b@example.invalid "
 
 # 注入的底层失败原因（固定），须原样出现在标准错误中。
 DENY_REASON = "index-write-denied"
@@ -109,34 +128,55 @@ class _IndexParser(HTMLParser):
     保留联系人清单位于“已排除的联系人”h2 之前；h2 之后的表格属于
     排除区域。convert_charrefs=True 使数字/命名实体按解析结果还原，
     因此还原后的文本与浏览器显示一致：&、尖括号、引号样式文字应作为
-    字面数据出现，不成标签或实体。
+    字面数据出现，不成标签或实体；普通空格在解析阶段本就逐字保留
+    （折叠只发生在排版阶段），其在浏览器中的保留由 style_text 内的
+    white-space: pre-wrap 规则与各元素的 class 共同保证，测试两者
+    一起核对。除单元格文本外，另按区域收集每个 td 是否带预排版类
+    （retained/excluded_cell_classes，与对应单元格文本一一平行），
+    并收集全部段落的 (class, 文本) 与 <style> 内的样式文本。
     """
 
     EXCLUDED_HEADING = "已排除的联系人"
+    FIELD_CLASS = "field-value"
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.retained_cells = []
         self.excluded_cells = []
+        self.retained_cell_classes = []
+        self.excluded_cell_classes = []
         self.links = []
         self.texts = []
+        self.paragraphs = []
+        self.style_text = ""
         self._cell = None
+        self._cell_class = None
         self._heading = None
         self._in_excluded = False
         self._current_cells = None
+        self._current_classes = None
+        self._paragraph = None
+        self._style_parts = None
 
     def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
         if tag == "h2":
             self._heading = []
         elif tag == "table":
-            self._current_cells = (
-                self.excluded_cells if self._in_excluded
-                else self.retained_cells
-            )
+            if self._in_excluded:
+                self._current_cells = self.excluded_cells
+                self._current_classes = self.excluded_cell_classes
+            else:
+                self._current_cells = self.retained_cells
+                self._current_classes = self.retained_cell_classes
         elif tag == "td":
             self._cell = []
+            self._cell_class = attrs_dict.get("class")
+        elif tag == "p":
+            self._paragraph = [attrs_dict.get("class"), []]
+        elif tag == "style":
+            self._style_parts = []
         elif tag == "a":
-            attrs_dict = dict(attrs)
             self.links.append(attrs_dict.get("href"))
 
     def handle_data(self, data):
@@ -145,6 +185,10 @@ class _IndexParser(HTMLParser):
             self._cell.append(data)
         if self._heading is not None:
             self._heading.append(data)
+        if self._paragraph is not None:
+            self._paragraph[1].append(data)
+        if self._style_parts is not None:
+            self._style_parts.append(data)
 
     def handle_endtag(self, tag):
         if tag == "h2" and self._heading is not None:
@@ -154,9 +198,22 @@ class _IndexParser(HTMLParser):
         elif tag == "td" and self._cell is not None:
             if self._current_cells is not None:
                 self._current_cells.append("".join(self._cell))
+                self._current_classes.append(
+                    self._cell_class == self.FIELD_CLASS
+                )
             self._cell = None
+            self._cell_class = None
+        elif tag == "p" and self._paragraph is not None:
+            self.paragraphs.append(
+                (self._paragraph[0], "".join(self._paragraph[1]))
+            )
+            self._paragraph = None
+        elif tag == "style" and self._style_parts is not None:
+            self.style_text += "".join(self._style_parts)
+            self._style_parts = None
         elif tag == "table":
             self._current_cells = None
+            self._current_classes = None
 
     def text(self):
         return "".join(self.texts)
@@ -606,6 +663,176 @@ class IndexPageTestCase(unittest.TestCase):
         self.assertIn("&quot;", raw)
         # 注入的 <x> 不得成为真实元素：原文中不应出现裸的 "<x>"。
         self.assertNotIn("<x>", raw)
+
+    def test_field_spaces_preserved_in_browser_layout_both_formats(self):
+        # 空格保留验收：姓名、邮箱与筛选值的首尾及内部连续普通空格
+        # U+0020 必须在浏览器实际排版中按原数量保留。默认 text 与
+        # --format html 各用一个独立空输出目录，字段显示结果一致、
+        # 链接扩展名随格式。环境无浏览器可用，故按浏览器渲染链静态
+        # 核对两层且缺一不可：(1) HTMLParser(convert_charrefs=True)
+        # 还原后的元素文本与 CSV 原文逐字相等（含首尾与连续空格、
+        # 未修剪、无可见标记）；(2) 这些元素都带预排版类，且页面
+        # 本地 <style> 中确有选择该类的 white-space: pre-wrap 规则
+        # ——浏览器对普通空格的折叠只发生在排版阶段，正是该规则令
+        # 其与 pre 一样保留空格。
+        per_format = {}
+        for fmt, extension in ((None, "txt"), ("html", "html")):
+            with self.subTest(format=fmt or "text"):
+                contacts_path = self._write(
+                    f"contacts-spaces-{fmt or 'text'}.csv",
+                    SPACE_CONTACTS,
+                )
+                template_path = self._write(
+                    f"template-spaces-{fmt or 'text'}.txt",
+                    SPACE_TEMPLATE,
+                )
+                out_path = os.path.join(
+                    self.tmp, f"previews-spaces-{fmt or 'text'}"
+                )
+                result = self._run(
+                    out_path,
+                    ["--exclude-email", SPACE_EXCLUDE_EMAIL],
+                    fmt=fmt,
+                    contacts_path=contacts_path,
+                    template_path=template_path,
+                    segment=SPACE_SEGMENT,
+                )
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    msg=f"stderr: "
+                    f"{result.stderr.decode('utf-8', 'replace')}",
+                )
+
+                # 三计数为分组命中 2、排除 1、最终预览 1；甲保留、
+                # 丙排除。
+                with open(os.path.join(out_path, "report.json"),
+                          encoding="utf-8") as fh:
+                    report = json.load(fh)
+                self.assertEqual(
+                    (report["segment_count"], report["excluded_count"],
+                     report["matched_count"]),
+                    (2, 1, 1),
+                )
+                self.assertEqual(
+                    report["previews"],
+                    [{"email": SPACE_EMAIL_KEPT,
+                      "file": f"preview-0001.{extension}"}],
+                )
+                self.assertEqual(
+                    report["excluded_contacts"],
+                    [{"name": SPACE_NAME_EXCLUDED,
+                      "email": SPACE_EMAIL_EXCLUDED}],
+                )
+
+                raw, parser = self._parse_index(out_path)
+                per_format[fmt or "text"] = (raw, parser)
+
+                # 样式块：选择预排版类并声明 white-space: pre-wrap，
+                # 本地内联、无网络引用；这是浏览器不折叠空格的直接
+                # 依据。
+                style = parser.style_text
+                self.assertIn(".field-value", style)
+                self.assertIn("white-space", style)
+                self.assertIn("pre-wrap", style)
+                for forbidden in ("http://", "https://", "@import",
+                                  "url("):
+                    self.assertNotIn(forbidden, style)
+
+                # 筛选值段落：带预排版类，解析文本与命令行筛选值原文
+                # 完全相等（首尾各一空格、中间两空格）；计数段落维持
+                # 普通排版（不带类）。
+                segment_paragraphs = [
+                    text for cls, text in parser.paragraphs
+                    if text.startswith("筛选值：")
+                ]
+                self.assertEqual(
+                    segment_paragraphs,
+                    [f"筛选值：{SPACE_SEGMENT}"],
+                )
+                segment_classes = [
+                    cls == _IndexParser.FIELD_CLASS
+                    for cls, text in parser.paragraphs
+                    if text.startswith("筛选值：")
+                ]
+                self.assertEqual(segment_classes, [True])
+                count_paragraphs = [
+                    (cls, text) for cls, text in parser.paragraphs
+                    if text.startswith("分组命中")
+                ]
+                self.assertEqual(len(count_paragraphs), 1)
+                self.assertIsNone(count_paragraphs[0][0])
+                self.assertEqual(
+                    count_paragraphs[0][1],
+                    "分组命中：2；排除：1；最终预览：1",
+                )
+
+                # 保留清单：甲的姓名、邮箱两格文本逐字等于 CSV 原文，
+                # 两格都带预排版类；第三格是不带类的“预览”链接格，
+                # 链接扩展名为该格式应有的扩展名。
+                self.assertEqual(
+                    parser.retained_cells,
+                    [SPACE_NAME_KEPT, SPACE_EMAIL_KEPT, "预览"],
+                )
+                self.assertEqual(
+                    parser.retained_cell_classes,
+                    [True, True, False],
+                )
+                self.assertEqual(
+                    parser.links, [f"preview-0001.{extension}"]
+                )
+
+                # 排除区域只列丙（姓名、邮箱），两格文本逐字等于原文
+                # 且都带预排版类，无任何链接。
+                self.assertEqual(
+                    parser.excluded_cells,
+                    [SPACE_NAME_EXCLUDED, SPACE_EMAIL_EXCLUDED],
+                )
+                self.assertEqual(
+                    parser.excluded_cell_classes, [True, True]
+                )
+
+                # 空格只按原 U+0020 保留：不修剪、不替换为不换行空格
+                # 或任何数字字符引用；原始字节中字段边缘空格仍在
+                # （& 等字符已按既有规则 HTML 转义，故按转义后形态
+                # 核对原文，空格本身不参与转义）。
+                for field in (SPACE_NAME_KEPT, SPACE_EMAIL_KEPT,
+                              SPACE_NAME_EXCLUDED, SPACE_EMAIL_EXCLUDED):
+                    self.assertIn(html.escape(field, quote=True), raw)
+                self.assertIn(">筛选值： news  letter <", raw)
+                for marker in ("&nbsp;", "&#160;", "&#xA0;", "&#32;",
+                               "&#x20;"):
+                    self.assertNotIn(marker, raw)
+                # 中文字面显示、& 仍按 HTML 转义为 &amp;。
+                self.assertIn(" 甲  &amp;乙 ", raw)
+
+                # 页面仍仅用本地相对预览链接、无网络资源。
+                self.assertNotIn("mailto:", raw)
+                for forbidden in ("http://", "https://", "src=",
+                                  "<script", "<img", "<link"):
+                    self.assertNotIn(forbidden, raw)
+
+                # 相对链接指向真实存在的同目录预览文件。
+                for href in parser.links:
+                    self.assertNotIn("/", href)
+                    self.assertTrue(
+                        os.path.isfile(os.path.join(out_path, href))
+                    )
+
+        # 两种格式的索引页字段显示（解析后文本、类标记与样式）一致。
+        raw_text, parser_text = per_format["text"]
+        raw_html, parser_html = per_format["html"]
+        self.assertEqual(
+            parser_text.retained_cells, parser_html.retained_cells
+        )
+        self.assertEqual(
+            parser_text.excluded_cells, parser_html.excluded_cells
+        )
+        self.assertEqual(
+            parser_text.style_text, parser_html.style_text
+        )
+        self.assertIn('href="preview-0001.txt"', raw_text)
+        self.assertIn('href="preview-0001.html"', raw_html)
 
     def _assert_failure_leaves_no_output(self, result, out_absent,
                                          out_empty, fragments):
