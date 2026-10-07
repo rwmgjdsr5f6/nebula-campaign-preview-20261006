@@ -50,6 +50,29 @@ python -m unittest discover -s tests
   不创建输出；html 模式下未知变量、缺列、输入不可读同样退出 2（新目录不
   创建、已有空目录保持为空）；非空输出目录被拒绝且原内容保留。
 
+## HTML 预览与邮箱排除的组合（`test_html_exclude_combined.py`）
+
+固定 UTF-8 CSV 样例（表头 `name,email,segment`，数据依次为甲、乙&安、
+丙、丁<宁>、戊；前四条 segment 为 newsletter、戊为 archive；甲、丙、戊
+共用 `cut@example.invalid`，乙&安与丁<宁>共用 `keep@example.invalid`）
+配合模板“你好，{{name}}！”（末尾恰一个 LF），核对两功能组合时留下的
+联系人、逐人正文与报告清单始终对应：
+
+- 选 newsletter、`--format html` 并重复两次排除 `cut@example.invalid`：
+  退出 0，标准输出与标准错误为空，目录恰好含 `preview-0001.html`、
+  `preview-0002.html` 与 `report.json`；两份 pre 正文依次为
+  “你好，乙&安！”与“你好，丁<宁>！”，末尾 LF 保留，`&`、`<`、`>`
+  经转义按字面显示、不成标签或实体；报告保留模板原文与筛选值，
+  `segment_count`/`excluded_count`/`matched_count` 依次为 4/2/2，排除
+  明细按 CSV 顺序仅含甲、丙，预览清单保留两条相同邮箱记录并分别指向
+  实际 HTML 文件，不合并、不留空号。
+- 边界一：再排除 `keep@example.invalid`：退出 0，目录仅有
+  `report.json`，三个计数依次为 4、4、0，排除明细依原顺序包含前四条，
+  预览清单为空。
+- 边界二：将甲的 name 留空并仍排除其邮箱：退出 2，stderr 点名第 2 行
+  与空字段 `name`、无 Traceback；尚不存在的输出目录保持不存在，已有
+  空目录保持为空。
+
 ## 联系人 CSV 的起始 BOM 兼容（`test_contacts_bom.py`）- 同一份联系人数据，一份为普通 UTF-8、一份以 EF BB BF 三个字节开头，
   分别输出到独立空目录：两次均退出 0，只生成 `preview-0001.txt` 与
   `report.json`，且两份输出逐字节一致；报告中 `segment_count` 为 2、
