@@ -34,3 +34,17 @@ python -m unittest discover -s tests
 
 所有断言针对真实子进程的退出码、stderr 与落盘内容，不直接调用内部函数。
 每个样例使用独立临时目录，结束后自动清理，不改动项目中的已有文件。
+
+## 联系人 CSV 的起始 BOM 兼容（`test_contacts_bom.py`）
+
+- 同一份联系人数据，一份为普通 UTF-8、一份以 EF BB BF 三个字节开头，
+  分别输出到独立空目录：两次均退出 0，只生成 `preview-0001.txt` 与
+  `report.json`，且两份输出逐字节一致；报告中 `segment_count` 为 2、
+  `excluded_count` 为 1、`matched_count` 为 1，排除明细只有乙，预览
+  清单只对应甲的邮箱，预览正文为“你好，甲！”并保留末尾 LF。
+- 带 BOM 的样例删除 `segment` 整列：退出 2，stderr 点名缺列 `segment`，
+  无 Traceback；尚不存在的输出目录仍不存在，已有空目录仍为空。
+- 边界：字段内部的 U+FEFF 原样保留；模板开头或正文内部的 U+FEFF 仍
+  作为正文保留在预览与报告原文中；BOM 之后的非法 UTF-8 字节仍导致
+  退出 2；仅含 BOM 的文件与空文件同样报缺少表头行；文件开头有两个
+  BOM 时只忽略第一个。

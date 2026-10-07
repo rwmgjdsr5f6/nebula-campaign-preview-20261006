@@ -17,23 +17,34 @@ REQUIRED_COLUMNS = ("name", "email", "segment")
 KNOWN_PLACEHOLDERS = ("name", "email", "segment")
 # 完整双花括号占位符，如 {{name}}；不完整的（如单个 { 或未闭合）按普通文字处理。
 PLACEHOLDER_RE = re.compile(r"\{\{([^{}]*)\}\}")
+# UTF-8 BOM（字节 EF BB BF）解码后的字符。仅联系人 CSV 文件开头的一个
+# 视为编码标记；字段内部出现的同名字符属于正文，不得删除。
+BOM = "\ufeff"
 
 
 class InputError(Exception):
     """输入或运行环境校验失败，对应退出码 2。"""
 
 
-def _read_text(path, description):
-    """以 UTF-8 读取文本文件；无法读取或解码时抛出 InputError。"""
+def _read_text(path, description, strip_bom=False):
+    """以 UTF-8 读取文本文件；无法读取或解码时抛出 InputError。
+
+    strip_bom 为 True 时（仅联系人 CSV），把文件开头的一个 U+FEFF
+    （字节 EF BB BF，UTF-8 BOM）视为编码标记并移除；字段内部的
+    U+FEFF 原样保留，不修剪任何其他内容。模板文件不使用此选项。
+    """
     try:
         with open(path, "r", encoding="utf-8", newline="") as fh:
-            return fh.read()
+            text = fh.read()
     except FileNotFoundError:
         raise InputError(f"无法读取{description}：文件不存在：{path}")
     except UnicodeDecodeError as exc:
         raise InputError(f"无法解码{description}（要求 UTF-8）：{path}：{exc}")
     except OSError as exc:
         raise InputError(f"无法读取{description}：{path}：{exc}")
+    if strip_bom and text.startswith(BOM):
+        text = text[len(BOM):]
+    return text
 
 
 def _parse_contacts(text):
@@ -159,7 +170,7 @@ def main(argv=None):
     try:
         # 先完整校验全部输入（含未匹配行），失败时不创建任何输出。
         excluded_emails = _normalize_excludes(args.exclude_email)
-        contacts_text = _read_text(args.contacts, "联系人 CSV")
+        contacts_text = _read_text(args.contacts, "联系人 CSV", strip_bom=True)
         template_text = _read_text(args.template, "模板文件")
         contacts = _parse_contacts(contacts_text)
         _validate_template(template_text)
