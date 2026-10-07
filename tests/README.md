@@ -87,3 +87,24 @@ python -m unittest discover -s tests
   stderr 点名路径或 `--exclude-file` 与原因、无 Traceback；尚不存在的
   输出目录不创建，已存在的空目录保持为空。
 
+## report.json 创建失败（`test_report_write_failure.py`）
+
+- 固定合成输入：contacts.csv 表头 `name,email,segment`，数据行
+  甲/a@example.invalid/newsletter 与 乙/b@example.invalid/newsletter；
+  template.txt 为“你好，{{name}}！”并以一个 LF 结束。命令开启
+  `--index`，分别覆盖默认文本格式与 `--format html`。
+- 每种格式先跑无故障对照：退出 0、stdout/stderr 为空，目录恰好含两份
+  连续编号预览、`report.json` 与 `index.html`；报告计数 2、0、2，
+  排除明细为空，预览清单按甲、乙顺序对应邮箱与实际扩展名。
+- 随后在相同输入的新输出目录中注入故障：仅对目标 `report.json` 的
+  `open` 在文件创建前抛出 `PermissionError("report-write-denied")`
+  （其余文件操作正常）。预期退出 2、stdout 为空，stderr 包含
+  report.json 路径与该原因、无 Traceback；两份预览完整保留且与同格式
+  对照逐字节一致，`report.json` 与 `index.html` 均不存在，无其他
+  新增文件。
+- 注入机制为纯标准库、跨平台：测试生成一个 `sitecustomize.py` 放入
+  独立临时目录，仅故障运行时 prepend 到子进程 `PYTHONPATH` 并以环境
+  变量传入目标路径；该模块包装 `builtins.open`，仅对目标路径抛错。
+  不需要管理员权限、不修改真实目录权限、不耗尽磁盘空间，也不依赖
+  RLIMIT 等平台专用接口，核心用例在 Windows 与 Linux 上都不跳过。
+
