@@ -108,7 +108,13 @@ def _prepare_out_dir(path):
     if os.path.exists(path):
         if not os.path.isdir(path):
             raise InputError(f"输出路径已存在且不是目录：{path}")
-        if os.listdir(path):
+        try:
+            entries = os.listdir(path)
+        except OSError as exc:
+            # 目录条目读取失败（权限不足等）既不能当作空目录继续，也不能
+            # 误报为非空；连同底层原因按输入/环境校验失败处理（退出 2）。
+            raise InputError(f"无法检查输出目录：{path}：{exc}")
+        if entries:
             raise InputError(f"输出目录非空，拒绝覆盖已有文件：{path}")
         if not os.access(path, os.W_OK):
             raise InputError(f"输出目录不可写：{path}")
