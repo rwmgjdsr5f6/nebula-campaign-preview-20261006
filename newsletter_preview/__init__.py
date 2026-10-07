@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import io
 import json
 import os
@@ -103,6 +104,28 @@ def _render(template, record):
     return PLACEHOLDER_RE.sub(lambda match: record[match.group(1)], template)
 
 
+def _render_html(content):
+    """把已替换变量的正文包装为完整 HTML 文档（声明 UTF-8，不引用网络资源）。
+
+    正文整体放入单个 pre 元素，原样保留中文、空格、空行与首尾换行；
+    先做 HTML 转义（&、<、>），模板与字段中的标签或实体样式文字
+    均按字面显示，不会成为页面元素。
+    """
+    escaped = html.escape(content, quote=False)
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="zh-CN">\n'
+        "<head>\n"
+        '<meta charset="UTF-8">\n'
+        "<title>newsletter preview</title>\n"
+        "</head>\n"
+        "<body>\n"
+        f"<pre>{escaped}</pre>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
 def _prepare_out_dir(path):
     """输出目录不存在时创建；存在时要求为空目录且可写。不覆盖已有文件。"""
     if os.path.exists(path):
@@ -161,6 +184,13 @@ def _build_parser():
     parser.add_argument("--segment", required=True, help="筛选值：segment 列的精确匹配值")
     parser.add_argument("--out", required=True, help="输出目录（不存在则创建，存在则须为空）")
     parser.add_argument(
+        "--format",
+        choices=("text", "html"),
+        default="text",
+        help="预览文件格式：text（默认，逐人文本）或 html（逐人 HTML 页面，"
+        "正文置于 pre 元素中按字面显示）",
+    )
+    parser.add_argument(
         "--exclude-email",
         action="append",
         default=None,
@@ -194,9 +224,13 @@ def main(argv=None):
         excluded_count = len(excluded)
         previews = []
         for number, contact in enumerate(matched, start=1):
-            filename = f"preview-{number:04d}.txt"
             # 单次扫描替换，替换值不再次解析；其余文字与换行原样保留。
             content = _render(template_text, contact)
+            if args.format == "html":
+                filename = f"preview-{number:04d}.html"
+                content = _render_html(content)
+            else:
+                filename = f"preview-{number:04d}.txt"
             _write_file(os.path.join(args.out, filename), content)
             previews.append({"email": contact["email"], "file": filename})
 
