@@ -607,6 +607,127 @@ class IndexPageTestCase(unittest.TestCase):
         # 注入的 <x> 不得成为真实元素：原文中不应出现裸的 "<x>"。
         self.assertNotIn("<x>", raw)
 
+    def test_field_spaces_preserved_in_browser_typesetting_both_formats(self):
+        # 用户验收：筛选值、姓名、邮箱带首尾及连续普通空格（U+0020）。
+        # 浏览器实际排版必须按原数量保留这些空格，而不只是源码里仍含
+        # 空格（普通排版会折叠内部连续空格、吞掉元素边缘空格）；不修剪
+        # 输入，也不用实体或可见标记替代。默认 text 与 --format html
+        # 两种格式、两个空输出目录的字段呈现一致，仅链接扩展名不同。
+        contacts = (
+            "name,email,segment\n"
+            '" 甲  &乙 "," a@example.invalid "," news  letter "\n'
+            '" 丙  丁 "," b@example.invalid "," news  letter "\n'
+        )
+        template = "你好，{{name}}！\n"
+        contacts_path = self._write("contacts-spaces.csv", contacts)
+        template_path = self._write("template-spaces.txt", template)
+        segment = " news  letter "
+        excluded_email = " b@example.invalid "
+
+        class _FieldParser(HTMLParser):
+            """收集页内样式文本与每个 field span 解析后的文字。"""
+
+            def __init__(self):
+                super().__init__(convert_charrefs=True)
+                self.style_parts = []
+                self.fields = []
+                self._in_style = False
+                self._field_depth = 0
+                self._buf = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "style":
+                    self._in_style = True
+                elif (tag == "span"
+                      and "field" in dict(attrs).get("class", "").split()):
+                    self._field_depth += 1
+                    self._buf.append([])
+
+            def handle_endtag(self, tag):
+                if tag == "style":
+                    self._in_style = False
+                elif tag == "span" and self._field_depth:
+                    self.fields.append("".join(self._buf.pop()))
+                    self._field_depth -= 1
+
+            def handle_data(self, data):
+                if self._in_style:
+                    self.style_parts.append(data)
+                if self._field_depth:
+                    self._buf[-1].append(data)
+
+        for fmt, extension in ((None, "txt"), ("html", "html")):
+            with self.subTest(format=fmt or "text"):
+                out_path = os.path.join(
+                    self.tmp, f"previews-spaces-{extension}"
+                )
+                result = self._run(
+                    out_path,
+                    ["--exclude-email", excluded_email],
+                    fmt=fmt,
+                    contacts_path=contacts_path,
+                    template_path=template_path,
+                    segment=segment,
+                )
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    msg=f"stderr: {result.stderr.decode('utf-8', 'replace')}",
+                )
+
+                raw, parser = self._parse_index(out_path)
+
+                # 计数 2、1、1；保留甲的预览链接，排除区域只有丙。
+                self.assertIn(
+                    "分组命中：2；排除：1；最终预览：1", parser.text()
+                )
+                self.assertEqual(parser.links,
+                                 [f"preview-0001.{extension}"])
+                self.assertTrue(os.path.isfile(
+                    os.path.join(out_path, f"preview-0001.{extension}")
+                ))
+                self.assertEqual(
+                    parser.retained_cells[:2],
+                    [" 甲  &乙 ", " a@example.invalid "],
+                )
+                self.assertEqual(
+                    parser.excluded_cells,
+                    [" 丙  丁 ", " b@example.invalid "],
+                )
+
+                # 五个字段（筛选值 + 保留姓名/邮箱 + 排除姓名/邮箱）
+                # 均在预排版元素内：解析还原后的文字与 CSV 原文逐字
+                # 一致，首尾与连续空格按原数量保留。
+                field_parser = _FieldParser()
+                field_parser.feed(raw)
+                self.assertEqual(
+                    field_parser.fields,
+                    [
+                        " news  letter ",
+                        " 甲  &乙 ", " a@example.invalid ",
+                        " 丙  丁 ", " b@example.invalid ",
+                    ],
+                )
+                # 页内样式必须让 field 元素以 pre-wrap 预排版渲染——
+                # 这是浏览器不折叠/不吞空格的依据；样式写在页内，不
+                # 引用网络资源。
+                style_text = "".join(field_parser.style_parts)
+                self.assertRegex(
+                    style_text,
+                    r"\.field\b[^}]*white-space\s*:\s*pre-wrap",
+                )
+
+                # 空格是普通字面字符：不修剪、不用字符引用或可见标记
+                # 替代；无网络资源引用。
+                for marker in ("&#32;", "&#x20;", "&#X20;", "&nbsp;"):
+                    self.assertNotIn(marker, raw)
+                self.assertIn(
+                    '<span class="field"> news  letter </span>', raw
+                )
+                for forbidden in ("http://", "https://", "<link",
+                                  "@import", "src="):
+                    self.assertNotIn(forbidden, raw)
+
     def _assert_failure_leaves_no_output(self, result, out_absent,
                                          out_empty, fragments):
         self.assertEqual(

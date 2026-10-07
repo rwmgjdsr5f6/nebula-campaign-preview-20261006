@@ -180,15 +180,29 @@ def _esc(value):
     return html.escape(value, quote=True)
 
 
+def _index_field(value):
+    """转义索引页字段原文并包一层保留空格排版的 span。
+
+    浏览器普通文本排版会折叠连续普通空格（U+0020）并吞掉元素边缘
+    的空格；样式 white-space: pre-wrap 使该 span 按预排版渲染：
+    首尾空格与字段内部的连续空格均按原数量显示，不修剪输入、不
+    折叠、也不插入任何可见标记（制表符、换行等其他空白同样按预
+    排版规则呈现）。span 与样式都不改变解析后的文字内容，_esc 的
+    字面显示保证继续有效。
+    """
+    return f'<span class="field">{_esc(value)}</span>'
+
+
 def _index_contact_row(cells, link=None):
     """构建清单中的一条 <tr>：姓名、邮箱单元格共用，可选第三列链接。
 
     cells 为已按 CSV 顺序取好的单元格原文序列（保留清单为姓名、
-    邮箱，排除清单同为姓名、邮箱）；逐格转义后包成纯文本单元格。
-    link 给定时（仅保留清单）追加同目录预览文件名的相对链接单元
-    格，文件名同样转义；排除清单不传，故无 a 元素、无 mailto。
+    邮箱，排除清单同为姓名、邮箱）；逐格经 _index_field 转义并包
+    上保留空格排版的 span 后放入单元格。link 给定时（仅保留清单）
+    追加同目录预览文件名的相对链接单元格，文件名同样转义；排除清
+    单不传，故无 a 元素、无 mailto。
     """
-    row = "".join(f"<td>{_esc(cell)}</td>" for cell in cells)
+    row = "".join(f"<td>{_index_field(cell)}</td>" for cell in cells)
     if link is not None:
         row += f'<td><a href="{_esc(link)}">预览</a></td>'
     return f"<tr>{row}</tr>"
@@ -233,9 +247,13 @@ def _build_index(segment, segment_count, excluded_count, matched, previews,
     头并传入同目录预览文件名作为第三列相对链接，排除清单不传链
     接。保留清单中的邮箱仅作文字展示，不生成 mailto 等任何非文件
     链接；链接 href 只写同目录预览文件名，输出目录整体移动后仍可
-    打开。matched 为空（零命中或全部排除）时保留清单区域显示固定
-    提示且不含任何预览链接；零命中时两个空状态同时出现。文档不
-    引用任何网络资源。
+    打开。筛选值与两类清单的姓名、邮箱字段经 _index_field 包在
+    white-space: pre-wrap 的 span 中：浏览器排版时首尾空格与字段
+    内部的连续普通空格（U+0020）按原数量保留，不靠修剪输入或插入
+    可见标记实现；计数、固定提示与表头文字不在其中，维持普通排版。
+    matched 为空（零命中或全部排除）时保留清单区域显示固定提示且
+    不含任何预览链接；零命中时两个空状态同时出现。文档不引用任何
+    网络资源，保留空格所需样式是页内 <style>，不是外部样式表。
     """
     retained_rows = [
         _index_contact_row(
@@ -267,10 +285,13 @@ def _build_index(segment, segment_count, excluded_count, matched, previews,
         "<head>\n"
         '<meta charset="utf-8">\n'
         "<title>newsletter preview index</title>\n"
+        # 页内样式（不引用网络资源）：字段 span 预排版，首尾与连续
+        # 普通空格按原数量显示。
+        "<style>.field{white-space:pre-wrap;}</style>\n"
         "</head>\n"
         "<body>\n"
         "<h1>预览索引</h1>\n"
-        f"<p>筛选值：{_esc(segment)}</p>\n"
+        f"<p>筛选值：{_index_field(segment)}</p>\n"
         f"<p>分组命中：{segment_count}；排除：{excluded_count}；"
         f"最终预览：{len(matched)}</p>\n"
         f"{listing}\n"
