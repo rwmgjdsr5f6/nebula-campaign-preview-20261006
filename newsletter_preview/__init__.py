@@ -38,6 +38,10 @@ def _read_text(path, description):
 
 def _parse_contacts(text):
     """解析并完整校验联系人 CSV（含未匹配行），返回记录列表。"""
+    # 文件开头（首行列名之前）的一个 UTF-8 BOM（U+FEFF）视为编码标记，
+    # 仅忽略这一个字符；字段内部的 U+FEFF 原样保留，不做任何修剪。
+    if text.startswith("\ufeff"):
+        text = text[1:]
     reader = csv.reader(io.StringIO(text))
     try:
         header = next(reader, None)
