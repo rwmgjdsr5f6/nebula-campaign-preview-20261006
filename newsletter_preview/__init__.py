@@ -134,6 +134,50 @@ def _wrap_html(body):
     )
 
 
+def _build_index_html(segment, segment_count, excluded_count, matched_count,
+                      entries):
+    """生成索引页：声明 UTF-8 的完整 HTML 文档，不引用任何网络资源。
+
+    页面显示筛选值与分组命中、排除、最终预览三个记录数（与 report.json
+    一致），并按 CSV 顺序列出每条保留记录的原始姓名、邮箱与预览链接。
+    链接地址为对应预览文件名（相对地址，目录整体移动后仍可打开）；
+    邮箱仅作为文字显示，不是链接。姓名、邮箱与筛选值整体转义：中文、
+    &、尖括号、引号及 {{name}} 样式文字均按字面显示，不解析为标签、
+    实体或变量，大小写与首尾空白原样保留。entries 为
+    (姓名, 邮箱, 文件名) 三元组，按 CSV 顺序排列；为空时页面保留
+    三个计数并显示“没有可预览的联系人”，不出现任何预览链接。
+    """
+    lines = [
+        "<!DOCTYPE html>",
+        '<html lang="zh-CN">',
+        "<head>",
+        '<meta charset="utf-8">',
+        "<title>newsletter preview index</title>",
+        "</head>",
+        "<body>",
+        "<h1>预览索引</h1>",
+        f"<p>筛选值：{html.escape(segment)}</p>",
+        "<ul>",
+        f"<li>分组命中：{segment_count}</li>",
+        f"<li>排除：{excluded_count}</li>",
+        f"<li>最终预览：{matched_count}</li>",
+        "</ul>",
+    ]
+    if entries:
+        lines.append("<ol>")
+        for name, email, filename in entries:
+            item = (
+                f"{html.escape(name)}（{html.escape(email)}）："
+                f'<a href="{filename}">{filename}</a>'
+            )
+            lines.append(f"<li>{item}</li>")
+        lines.append("</ol>")
+    else:
+        lines.append("<p>没有可预览的联系人</p>")
+    lines.extend(["</body>", "</html>"])
+    return "\n".join(lines) + "\n"
+
+
 def _prepare_out_dir(path):
     """输出目录不存在时创建；存在时要求为空目录且可写。不覆盖已有文件。"""
     if os.path.exists(path):
@@ -206,6 +250,12 @@ def _build_parser():
         help="逐人预览格式：text（默认，.txt 文本）或 html"
         "（完整 UTF-8 HTML 文档，正文在 pre 中按字面显示，.html）",
     )
+    parser.add_argument(
+        "--index",
+        action="store_true",
+        help="在输出目录额外生成 index.html 索引页（筛选值、三个记录数与"
+        "逐人预览链接）；省略时产物与既有版本完全一致",
+    )
     return parser
 
 
@@ -231,6 +281,7 @@ def main(argv=None):
         segment_count = len(segment_matched)
         excluded_count = len(excluded)
         previews = []
+        index_entries = []
         extension = "html" if args.format == "html" else "txt"
         for number, contact in enumerate(matched, start=1):
             filename = f"preview-{number:04d}.{extension}"
@@ -242,6 +293,7 @@ def main(argv=None):
                 content = _wrap_html(content)
             _write_file(os.path.join(args.out, filename), content)
             previews.append({"email": contact["email"], "file": filename})
+            index_entries.append((contact["name"], contact["email"], filename))
 
         report = {
             "template": template_text,
@@ -258,6 +310,19 @@ def main(argv=None):
             os.path.join(args.out, "report.json"),
             json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         )
+        # 索引页最后写出：不影响既有产物的内容与顺序；写入失败时
+        # 已写出的预览与报告允许保留，按输入/环境校验失败退出 2。
+        if args.index:
+            _write_file(
+                os.path.join(args.out, "index.html"),
+                _build_index_html(
+                    args.segment,
+                    segment_count,
+                    excluded_count,
+                    len(matched),
+                    index_entries,
+                ),
+            )
     except InputError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
