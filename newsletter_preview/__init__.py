@@ -14,7 +14,7 @@ import re
 import sys
 
 REQUIRED_COLUMNS = ("name", "email", "segment")
-KNOWN_PLACEHOLDERS = ("name", "email")
+KNOWN_PLACEHOLDERS = ("name", "email", "segment")
 # 完整双花括号占位符，如 {{name}}；不完整的（如单个 { 或未闭合）按普通文字处理。
 PLACEHOLDER_RE = re.compile(r"\{\{([^{}]*)\}\}")
 
@@ -77,7 +77,7 @@ def _parse_contacts(text):
 
 
 def _validate_template(template):
-    """校验模板中的完整双花括号占位符，仅允许 {{name}} 与 {{email}}。"""
+    """校验模板中的完整双花括号占位符，仅允许 {{name}}、{{email}} 与 {{segment}}。"""
     for match in PLACEHOLDER_RE.finditer(template):
         variable = match.group(1)
         if variable not in KNOWN_PLACEHOLDERS:
