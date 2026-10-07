@@ -48,3 +48,15 @@ python -m unittest discover -s tests
   作为正文保留在预览与报告原文中；BOM 之后的非法 UTF-8 字节仍导致
   退出 2；仅含 BOM 的文件与空文件同样报缺少表头行；文件开头有两个
   BOM 时只忽略第一个。
+
+## 输出目录条目读取失败（`test_output_dir_unreadable.py`）
+
+- 固定样例：联系人仅甲一行（newsletter），模板“你好，{{name}}！”；
+  现有空目录可读可写时退出 0，恰好生成 preview-0001.txt 与
+  report.json（matched_count 为 1、excluded_count 为 0）。
+- 目录存在但读取条目失败（以 chmod 0o000 模拟；当前环境无法模拟时
+  自动跳过）：退出 2、stdout 为空、stderr 含“无法检查输出目录”、
+  原样 --out 路径与底层原因、无 Traceback，且不误报为目录非空；
+  目录保持为空、权限不变，恢复可读后可正常生成。
+- 筛选后无人保留时采用同一拒绝结果；联系人与模板的既有输入校验
+  先于目录检查，输入错误的提示不被目录错误取代。
