@@ -134,6 +134,60 @@ def _wrap_html(body):
     )
 
 
+def _build_index(segment, segment_count, excluded_count, matched, previews):
+    """构建 index.html：声明 UTF-8 的完整离线索引文档。
+
+    页面展示筛选值与分组命中、排除、最终预览三个记录数（与报告同
+    源），清单按 CSV 顺序列出每条保留记录的原始姓名、邮箱及预览
+    链接。所有来自输入的文字（筛选值、姓名、邮箱）与计数一样先经
+    HTML 转义再写入纯文本节点或属性：中文、&、尖括号、引号及
+    {{name}} 样式文字均按字面显示，不解析为标签、实体或变量，并
+    保留大小写与首尾空白；邮箱仅作文字展示，不生成 mailto 等任何
+    非文件链接。链接 href 只写同目录预览文件名这一相对地址，输出
+    目录整体移动后仍可打开。matched 为空（零命中或全部排除）时
+    清单区域显示固定提示且不含任何预览链接。文档不引用任何网络
+    资源。
+    """
+    rows = []
+    for contact, preview in zip(matched, previews):
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(contact['name'], quote=True)}</td>"
+            f"<td>{html.escape(contact['email'], quote=True)}</td>"
+            f'<td><a href="{html.escape(preview["file"], quote=True)}">'
+            "预览</a></td>"
+            "</tr>"
+        )
+    if rows:
+        listing = (
+            "<table>\n"
+            "<thead><tr><th>姓名</th><th>邮箱</th><th>预览</th></tr>"
+            "</thead>\n"
+            "<tbody>\n"
+            + "\n".join(rows)
+            + "\n</tbody>\n"
+            "</table>"
+        )
+    else:
+        listing = "<p>没有可预览的联系人</p>"
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="zh-CN">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        "<title>newsletter preview index</title>\n"
+        "</head>\n"
+        "<body>\n"
+        "<h1>预览索引</h1>\n"
+        f"<p>筛选值：{html.escape(segment, quote=True)}</p>\n"
+        f"<p>分组命中：{segment_count}；排除：{excluded_count}；"
+        f"最终预览：{len(matched)}</p>\n"
+        f"{listing}\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
 def _prepare_out_dir(path):
     """输出目录不存在时创建；存在时要求为空目录且可写。不覆盖已有文件。"""
     if os.path.exists(path):
@@ -206,6 +260,13 @@ def _build_parser():
         help="逐人预览格式：text（默认，.txt 文本）或 html"
         "（完整 UTF-8 HTML 文档，正文在 pre 中按字面显示，.html）",
     )
+    parser.add_argument(
+        "--index",
+        action="store_true",
+        help="在输出目录额外生成 index.html：按 CSV 顺序列出保留记录的"
+        "原始姓名、邮箱与相对预览链接，并显示筛选值及分组命中、排除、"
+        "最终预览三个计数；省略时不生成该文件，其余产物逐字节不变",
+    )
     return parser
 
 
@@ -258,6 +319,19 @@ def main(argv=None):
             os.path.join(args.out, "report.json"),
             json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         )
+        # 索引页最后写出：未开启 --index 时不走此步，已有预览与报告
+        # 与未开启时逐字节一致；写入失败同样退出 2，已写出的文件保留。
+        if args.index:
+            _write_file(
+                os.path.join(args.out, "index.html"),
+                _build_index(
+                    args.segment,
+                    segment_count,
+                    excluded_count,
+                    matched,
+                    previews,
+                ),
+            )
     except InputError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
