@@ -91,6 +91,60 @@ class ExcludeEmailTestCase(unittest.TestCase):
             capture_output=True,
         )
 
+    def test_excluded_contacts_lists_removed_records_in_csv_order(self):
+        # 排除明细：仅收录分组命中后被移除的记录，按 CSV 顺序逐条列出
+        # （共享邮箱的甲、乙各自保留，姓名邮箱相同也不合并）；其他分组的
+        # 丁即使邮箱相同也不进入明细。数组长度等于 excluded_count。
+        contacts = (
+            "name,email,segment\n"
+            "甲,a@example.invalid,newsletter\n"
+            "乙,a@example.invalid,newsletter\n"
+            "丙,b@example.invalid,newsletter\n"
+            "丁,a@example.invalid,archive\n"
+        )
+        contacts_path = self._write("acceptance.csv", contacts)
+        out_path = os.path.join(self.tmp, "out-detail")
+        result = self._run(
+            out_path,
+            ["--exclude-email", EMAIL_A],
+            contacts_path=contacts_path,
+        )
+
+        self.assertEqual(result.returncode, 0,
+                         msg=result.stderr.decode("utf-8", "replace"))
+        with open(os.path.join(out_path, "report.json"),
+                  encoding="utf-8") as fh:
+            report = json.load(fh)
+        self.assertEqual(report["segment_count"], 3)
+        self.assertEqual(report["excluded_count"], 2)
+        self.assertEqual(report["matched_count"], 1)
+        self.assertEqual(
+            report["excluded_contacts"],
+            [
+                {"name": "甲", "email": EMAIL_A},
+                {"name": "乙", "email": EMAIL_A},
+            ],
+        )
+        self.assertEqual(len(report["excluded_contacts"]),
+                         report["excluded_count"])
+
+    def test_excluded_contacts_empty_without_exclusions(self):
+        # 不提供排除参数、排除值未命中任何记录时，明细均为空数组。
+        for label, extra in (
+            ("no-flag", []),
+            ("no-match", ["--exclude-email", "nobody@example.invalid"]),
+        ):
+            out_path = os.path.join(self.tmp, f"out-{label}")
+            result = self._run(out_path, extra)
+
+            self.assertEqual(result.returncode, 0,
+                             msg=result.stderr.decode("utf-8", "replace"))
+            with open(os.path.join(out_path, "report.json"),
+                      encoding="utf-8") as fh:
+                report = json.load(fh)
+            self.assertEqual(report["excluded_contacts"], [], msg=label)
+            self.assertEqual(report["excluded_count"], 0, msg=label)
+
     def test_shared_email_excluded_other_preview_kept(self):
         # 验收样例：排除 a@example.invalid 后共享该邮箱的甲、乙两条记录
         # 全部移除；丙保留并编号 0001，报告只列 b@example.invalid。
