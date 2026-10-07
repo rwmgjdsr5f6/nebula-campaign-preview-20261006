@@ -19,7 +19,12 @@ index.html，同输入、同格式下与未开启的运行逐字节一致，索�
 文件允许保留。
 
 仅依赖 Python 3 标准库，完全离线；样例联系人为合成数据，邮箱使用
-RFC 2606 保留的 example.invalid 虚构域名。
+RFC 2606 保留的 example.invalid 虚构域名。索引写入失败用例不使用
+RLIMIT、信号或权限变更：把一个标准库 sitecustomize 模块放进独立临时
+目录，仅在故障运行时 prepend 到子进程 PYTHONPATH，由解释器启动时的
+site 模块自动导入；该模块包装 builtins.open，仅对环境变量指定的
+index.html 目标路径在创建前抛出 PermissionError，其余调用原样转发，
+因此 Windows 与常见 Linux 环境行为一致，任何平台都不跳过。
 
 从项目根目录执行：
 
@@ -32,9 +37,7 @@ RFC 2606 保留的 example.invalid 虚构域名。
 
 import json
 import os
-import resource
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -57,6 +60,47 @@ TEMPLATE = "你好，{{name}}！"
 SEGMENT = "newsletter"
 EMAIL_SHARED = "shared@example.invalid"
 EMAIL_CUT = "cut@example.invalid"
+
+# 索引写入失败用例的固定合成输入：唯一数据行 甲，模板以一个 LF 结束。
+SIMPLE_CONTACTS = (
+    "name,email,segment\n甲,a@example.invalid,newsletter\n"
+)
+SIMPLE_TEMPLATE = "你好，{{name}}！\n"
+
+# 注入的底层失败原因（固定），须原样出现在标准错误中。
+DENY_REASON = "index-write-denied"
+# 向子进程传递目标 index.html 路径的环境变量名。
+DENY_PATH_ENV = "NEWSLETTER_PREVIEW_TEST_DENY_INDEX_PATH"
+
+# 故障注入模块：仅在故障运行时通过 PYTHONPATH 进入子进程。site 模块在
+# 解释器启动时自动导入它；它包装 builtins.open，仅对环境变量指定的
+# 目标路径在创建前抛出 PermissionError，其余 open 调用原样转发，因此
+# 输入读取、逐人预览与报告写入完全不受影响，目标文件根本不会被创建。
+SITECUSTOMIZE = '''\
+"""测试注入：仅对指定路径的 open 在创建前抛出 PermissionError。"""
+import builtins
+import os
+
+_TARGET = os.environ.get(%r)
+
+if _TARGET:
+    _target = os.path.normcase(os.path.abspath(_TARGET))
+    _real_open = builtins.open
+
+    def _guarded_open(file, *args, **kwargs):
+        try:
+            path = os.fspath(file)
+        except TypeError:
+            path = None
+        if (
+            isinstance(path, str)
+            and os.path.normcase(os.path.abspath(path)) == _target
+        ):
+            raise PermissionError(%r)
+        return _real_open(file, *args, **kwargs)
+
+    builtins.open = _guarded_open
+''' % (DENY_PATH_ENV, DENY_REASON)
 
 
 class _IndexParser(HTMLParser):
@@ -124,6 +168,16 @@ class IndexPageTestCase(unittest.TestCase):
         self.tmp = self._tmp.name
         self.contacts_path = self._write("contacts.csv", CONTACTS)
         self.template_path = self._write("template.txt", TEMPLATE)
+        # 注入目录：仅故障运行把它 prepend 到子进程 PYTHONPATH。
+        self.inject_dir = os.path.join(self.tmp, "inject")
+        os.mkdir(self.inject_dir)
+        with open(
+            os.path.join(self.inject_dir, "sitecustomize.py"),
+            "w",
+            encoding="utf-8",
+            newline="",
+        ) as fh:
+            fh.write(SITECUSTOMIZE)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -135,13 +189,26 @@ class IndexPageTestCase(unittest.TestCase):
         return path
 
     def _run(self, out_path, extra_args=(), fmt="html", index=True,
-             contacts_path=None, template_path=None, segment=SEGMENT):
+             contacts_path=None, template_path=None, segment=SEGMENT,
+             deny_index=False):
         """通过 README 记载的公开入口运行，返回 CompletedProcess。
 
-        fmt 为 None 时省略 --format（即默认 text 格式）。
+        fmt 为 None 时省略 --format（即默认 text 格式）。deny_index 为
+        True 时启用 sitecustomize 注入，令该输出目录中 index.html 的
+        创建在文件创建前以 PermissionError(DENY_REASON) 失败。
         """
         env = dict(os.environ)
-        env["PYTHONPATH"] = PROJECT_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+        # 固定子进程 stdio 编码，保证各平台下 stderr 可按 UTF-8 解码。
+        env["PYTHONIOENCODING"] = "utf-8"
+        pythonpath = [PROJECT_ROOT]
+        if deny_index:
+            pythonpath.insert(0, self.inject_dir)
+            env[DENY_PATH_ENV] = os.path.join(out_path, "index.html")
+        env["PYTHONPATH"] = (
+            os.pathsep.join(pythonpath)
+            + os.pathsep
+            + env.get("PYTHONPATH", "")
+        )
         argv = [
             sys.executable,
             "-m",
@@ -641,63 +708,74 @@ class IndexPageTestCase(unittest.TestCase):
         with open(keep_path, "rb") as fh:
             self.assertEqual(fh.read(), keep_bytes)
 
-    def test_index_write_failure_exits_2_names_file_keeps_written(self):
-        # 用 RLIMIT_FSIZE 把单文件大小上限恰好设为 report.json 的
-        # 字节数：预览与报告都能写完，index.html 首次写入即失败。
-        # 预期退出 2、stderr 点名 index.html 与底层原因、无
-        # Traceback；已写文件允许保留。
-        if not hasattr(resource, "RLIMIT_FSIZE"):
-            self.skipTest("当前平台不支持 RLIMIT_FSIZE")
-
-        control = os.path.join(self.tmp, "control")
+    def _run_index_control(self, label, fmt, extension):
+        """单联系人固定输入的无故障对照：退出 0、stdio 全空，目录恰好
+        一份连续编号预览、report.json 与 index.html；报告计数
+        1、0、1，预览正文替换姓名并保留末尾 LF。返回输出目录路径。"""
+        contacts_path = self._write(f"c-simple-{label}.csv", SIMPLE_CONTACTS)
+        template_path = self._write(f"t-simple-{label}.txt", SIMPLE_TEMPLATE)
+        out_path = os.path.join(self.tmp, f"out-index-{label}-control")
         result = self._run(
-            control,
-            fmt="text",
-            index=False,
-            contacts_path=self._write(
-                "c-simple.csv",
-                "name,email,segment\n甲,a@example.invalid,newsletter\n",
-            ),
-            template_path=self._write("t-simple.txt", "你好，{{name}}！"),
+            out_path,
+            fmt=fmt,
+            contacts_path=contacts_path,
+            template_path=template_path,
         )
-        self.assertEqual(result.returncode, 0)
-        limit = os.path.getsize(os.path.join(control, "report.json"))
 
-        wrapper = os.path.join(self.tmp, "fsize_wrapper.py")
-        with open(wrapper, "w", encoding="utf-8") as fh:
-            fh.write(
-                "import os, resource, signal, sys\n"
-                "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
-                "resource.setrlimit(resource.RLIMIT_FSIZE,\n"
-                "                  (int(sys.argv[1]), resource.RLIM_INFINITY))\n"
-                "os.execv(sys.executable,\n"
-                "         [sys.executable, '-m', 'newsletter_preview']\n"
-                "         + sys.argv[2:])\n"
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stderr: {result.stderr.decode('utf-8', 'replace')}",
+        )
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"")
+
+        preview_name = f"preview-0001.{extension}"
+        self.assertEqual(
+            sorted(os.listdir(out_path)),
+            ["index.html", preview_name, "report.json"],
+        )
+
+        with open(os.path.join(out_path, "report.json"),
+                  encoding="utf-8") as fh:
+            report = json.load(fh)
+        self.assertEqual(
+            (report["segment_count"], report["excluded_count"],
+             report["matched_count"]),
+            (1, 0, 1),
+        )
+        self.assertEqual(
+            report["previews"],
+            [{"email": "a@example.invalid", "file": preview_name}],
+        )
+
+        # 预览正文准确替换姓名并保留模板末尾的一个 LF。
+        if extension == "txt":
+            self.assertEqual(
+                self._read_bytes(out_path, preview_name),
+                "你好，甲！\n".encode("utf-8"),
             )
+        else:
+            doc = self._read_bytes(out_path, preview_name).decode("utf-8")
+            self.assertTrue(doc.startswith("<!DOCTYPE html>"))
+            self.assertIn('<meta charset="utf-8">', doc)
+            self.assertIn("<pre>你好，甲！\n</pre>", doc)
+        return out_path
 
-        out_path = os.path.join(self.tmp, "previews-partial")
-        env = dict(os.environ)
-        env["PYTHONPATH"] = PROJECT_ROOT + os.pathsep + env.get("PYTHONPATH", "")
-        result = subprocess.run(
-            [
-                sys.executable,
-                wrapper,
-                str(limit),
-                "--contacts",
-                os.path.join(self.tmp, "c-simple.csv"),
-                "--template",
-                os.path.join(self.tmp, "t-simple.txt"),
-                "--segment",
-                SEGMENT,
-                "--out",
-                out_path,
-                "--format",
-                "text",
-                "--index",
-            ],
-            cwd=PROJECT_ROOT,
-            env=env,
-            capture_output=True,
+    def _run_index_denied(self, label, fmt, extension, control_out):
+        """index.html 创建前以 PermissionError 失败：核对退出结果与
+        落盘状态，并与同格式对照逐字节比对保留的预览与报告。"""
+        contacts_path = self._write(f"c-simple-{label}-deny.csv",
+                                    SIMPLE_CONTACTS)
+        template_path = self._write(f"t-simple-{label}-deny.txt",
+                                    SIMPLE_TEMPLATE)
+        out_path = os.path.join(self.tmp, f"out-index-{label}-denied")
+        result = self._run(
+            out_path,
+            fmt=fmt,
+            contacts_path=contacts_path,
+            template_path=template_path,
+            deny_index=True,
         )
 
         self.assertEqual(
@@ -705,24 +783,44 @@ class IndexPageTestCase(unittest.TestCase):
             2,
             msg=f"stderr: {result.stderr.decode('utf-8', 'replace')}",
         )
+        self.assertEqual(result.stdout, b"", msg="故障时标准输出必须为空")
         stderr = result.stderr.decode("utf-8")
+        index_path = os.path.join(out_path, "index.html")
+        # 标准错误点名 index.html 的完整目标路径与固定底层原因，无
+        # Traceback。
         self.assertIn("无法写入输出文件", stderr)
-        self.assertIn("index.html", stderr)
-        # 底层原因必须透传（文件过大）。
-        self.assertIn("File too large", stderr)
+        self.assertIn(index_path, stderr)
+        self.assertIn(DENY_REASON, stderr)
         self.assertNotIn("Traceback (most recent call last)", stderr)
 
-        # 已写文件允许保留：预览与报告存在且字节完整。
-        self.assertTrue(
-            os.path.isfile(os.path.join(out_path, "preview-0001.txt"))
-        )
-        with open(os.path.join(out_path, "report.json"),
-                  encoding="utf-8") as fh:
-            report = json.load(fh)
-        self.assertEqual(report["matched_count"], 1)
-        with open(os.path.join(out_path, "preview-0001.txt"),
-                  encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), "你好，甲！")
+        # 输入读取、逐人预览与报告写入仍正常进行：目录恰好保留一份
+        # 预览与 report.json，与同格式无故障结果逐字节一致；index.html
+        # 不存在，也没有其他新增文件。
+        preview_name = f"preview-0001.{extension}"
+        self.assertEqual(sorted(os.listdir(out_path)),
+                         [preview_name, "report.json"])
+        self.assertFalse(os.path.exists(index_path))
+        for name in (preview_name, "report.json"):
+            self.assertEqual(
+                self._read_bytes(out_path, name),
+                self._read_bytes(control_out, name),
+                msg=f"{name} 与同格式无故障结果不一致",
+            )
+
+    def _read_bytes(self, out_path, name):
+        with open(os.path.join(out_path, name), "rb") as fh:
+            return fh.read()
+
+    def test_index_write_failure_default_text_format(self):
+        # 默认文本格式（省略 --format）：无故障对照后，在另一空目录仅
+        # 令 index.html 创建前以 PermissionError 失败。
+        control_out = self._run_index_control("text", None, "txt")
+        self._run_index_denied("text", None, "txt", control_out)
+
+    def test_index_write_failure_html_format(self):
+        # --format html：同上，保留的 .html 预览与报告与对照逐字节一致。
+        control_out = self._run_index_control("html", "html", "html")
+        self._run_index_denied("html", "html", "html", control_out)
 
 
 if __name__ == "__main__":
