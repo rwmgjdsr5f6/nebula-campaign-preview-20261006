@@ -61,3 +61,24 @@ python -m unittest discover -s tests
   作为正文保留在预览与报告原文中；BOM 之后的非法 UTF-8 字节仍导致
   退出 2；仅含 BOM 的文件与空文件同样报缺少表头行；文件开头有两个
   BOM 时只忽略第一个。
+
+## `--exclude-file` 文件名单（`test_exclude_file.py`）
+
+- 验收固定样例（五人：甲、乙共用 a、丙用 b、丁用 c，同属 newsletter；
+  archive 的戊共用 a）配合 `excludes.txt`（两行 a 与一个空行）及
+  `--exclude-email c@example.invalid`：退出 0、stderr 为空，只生成丙的
+  `preview-0001.txt` 与 `report.json`，正文为“你好，丙！”并保留末尾
+  LF；报告计数为分组命中 4、排除 3、最终预览 1，排除明细按 CSV 顺序列
+  甲、乙、丁，预览清单仅列丙，戊不进入任何清单。
+- 名单解析：LF、CRLF 与末行无换行等价；空行及仅含空白的行忽略；只移除
+  行结束符（大小写不同或带首尾空白的行不命中）；空文件与只含空白行的
+  文件视为空名单，产物与不带任何排除参数逐字节一致。
+- 文件名单与等价的 `--exclude-email` 名单逐字节一致；两来源交叉重复不
+  叠加计数；未命中值不影响结果。
+- 失败：名单文件不存在、不可读（chmod 000，root 下跳过）、非法 UTF-8
+  与 `--exclude-file` 缺值均退出 2，stderr 点名 `--exclude-file` 且包含
+  路径与原因、无 Traceback，尚不存在的输出目录不创建、已有空目录保持
+  为空；零命中分组时名单文件仍被读取与校验。
+- `text`、`--format html` 与 `--index` 共用同一名单：相对链接为
+  `.html`、排除区域与报告明细一致、转义与空状态不变；全部排除时退出 0，
+  只有零预览报告（及索引）。

@@ -1,0 +1,6 @@
+name,email,segment
+甲,a@example.invalid,newsletter
+乙,a@example.invalid,newsletter
+丙,b@example.invalid,newsletter
+丁,c@example.invalid,newsletter
+戊,a@example.invalid,archive

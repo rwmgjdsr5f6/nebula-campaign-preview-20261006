@@ -265,6 +265,42 @@ def _normalize_excludes(values):
     return frozenset(values)
 
 
+def _read_exclude_file(path):
+    """读取 --exclude-file 名单文件（UTF-8、无表头），返回去重后原值集合。
+
+    文件按行解释，仅支持 LF 与 CRLF 行结束符并兼容末行无换行：除行
+    结束符外不改动任何字符——区分大小写、保留首尾空白；空行及仅含
+    空白的行忽略。空文件（含只含空白行的文件）视为空名单。重复行不
+    叠加效果。文件不存在、无法读取或无法以 UTF-8 解码时抛出
+    InputError（退出 2），信息点名 --exclude-file、路径与底层原因；
+    该读取先于输出目录准备，失败时不创建任何输出。
+    """
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        raise InputError(
+            f"无法读取 --exclude-file 名单文件：文件不存在：{path}"
+        )
+    except UnicodeDecodeError as exc:
+        raise InputError(
+            f"无法解码 --exclude-file 名单文件（要求 UTF-8）：{path}：{exc}"
+        )
+    except OSError as exc:
+        raise InputError(f"无法读取 --exclude-file 名单文件：{path}：{exc}")
+    values = set()
+    # newline="" 关闭通用换行转换，CRLF 原样保留，故这里只显式移除
+    # LF 以及 CRLF 末尾的 CR；单独出现的 CR 不属于支持的行结束符，
+    # 按行内容保留。split("\n") 对末行无换行与末尾换行同样适用，
+    # 末尾换行会产生一个被忽略的空片段而不会误收空字符串。
+    for raw_line in text.split("\n"):
+        line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
+        if line.strip() == "":
+            continue
+        values.add(line)
+    return frozenset(values)
+
+
 def _build_parser():
     parser = argparse.ArgumentParser(
         prog="newsletter_preview",
@@ -282,6 +318,15 @@ def _build_parser():
         metavar="EMAIL",
         help="排除邮箱：从匹配记录中移除 email 与之完全相同的记录"
         "（区分大小写、不修剪空白）；可重复提供以排除多个邮箱",
+    )
+    parser.add_argument(
+        "--exclude-file",
+        metavar="PATH",
+        help="排除名单文件路径（UTF-8、无表头）：每行一个邮箱，支持"
+        " LF、CRLF 行结束符并兼容末行无换行；空行及仅含空白的行忽略，"
+        "其余行只移除行结束符（区分大小写、保留首尾空白），空文件视为"
+        "空名单。文件名单与全部 --exclude-email 合并后按邮箱原文精确"
+        "匹配，重复值不叠加计数",
     )
     parser.add_argument(
         "--format",
@@ -308,6 +353,12 @@ def main(argv=None):
     try:
         # 先完整校验全部输入（含未匹配行），失败时不创建任何输出。
         excluded_emails = _normalize_excludes(args.exclude_email)
+        if args.exclude_file is not None:
+            # 文件名单与命令行名单合并去重：同为原文精确匹配，任一来源
+            # 给出的值都参与排除；读取先于输出目录准备，失败不创建输出。
+            excluded_emails = excluded_emails | _read_exclude_file(
+                args.exclude_file
+            )
         contacts_text = _read_text(args.contacts, "联系人 CSV", strip_bom=True)
         template_text = _read_text(args.template, "模板文件")
         contacts = _parse_contacts(contacts_text)
