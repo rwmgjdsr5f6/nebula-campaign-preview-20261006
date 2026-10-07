@@ -163,9 +163,10 @@ def main(argv=None):
         # 计数按 CSV 数据记录统计，不按唯一邮箱：共享邮箱的每条匹配记录
         # 各计一次命中，被排除时排除数同样逐条累加。
         segment_matched = [c for c in contacts if c["segment"] == args.segment]
+        excluded = [c for c in segment_matched if c["email"] in excluded_emails]
         matched = [c for c in segment_matched if c["email"] not in excluded_emails]
         segment_count = len(segment_matched)
-        excluded_count = segment_count - len(matched)
+        excluded_count = len(excluded)
         previews = []
         for number, contact in enumerate(matched, start=1):
             filename = f"preview-{number:04d}.txt"
@@ -179,6 +180,11 @@ def main(argv=None):
             "segment": args.segment,
             "segment_count": segment_count,
             "excluded_count": excluded_count,
+            # 被 --exclude-email 移除的分组命中记录，按 CSV 顺序逐条列出；
+            # 共享邮箱的多条记录分别保留，无排除时为空数组。
+            "excluded_contacts": [
+                {"name": c["name"], "email": c["email"]} for c in excluded
+            ],
             "matched_count": len(matched),
             "previews": previews,
         }

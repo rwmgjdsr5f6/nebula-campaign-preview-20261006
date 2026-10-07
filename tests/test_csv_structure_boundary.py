@@ -52,6 +52,7 @@ EXPECTED_REPORT = {
     "segment": SEGMENT,
     "segment_count": 2,
     "excluded_count": 0,
+    "excluded_contacts": [],
     "matched_count": 2,
     "previews": [
         {"email": "a@example.invalid", "file": "preview-0001.txt"},

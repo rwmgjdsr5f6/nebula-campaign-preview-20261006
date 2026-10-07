@@ -52,6 +52,7 @@ REPORT_EXACT = {
     "segment": SEGMENT_EXACT,
     "segment_count": 2,
     "excluded_count": 0,
+    "excluded_contacts": [],
     "matched_count": 2,
     "previews": [
         {"email": EMAIL, "file": "preview-0001.txt"},
@@ -63,6 +64,7 @@ REPORT_TRAILING_SPACE = {
     "segment": SEGMENT_TRAILING_SPACE,
     "segment_count": 1,
     "excluded_count": 0,
+    "excluded_contacts": [],
     "matched_count": 1,
     "previews": [
         {"email": EMAIL, "file": "preview-0001.txt"},
@@ -73,6 +75,7 @@ REPORT_ZERO_MATCH = {
     "segment": SEGMENT_ABSENT,
     "segment_count": 0,
     "excluded_count": 0,
+    "excluded_contacts": [],
     "matched_count": 0,
     "previews": [],
 }

@@ -2,7 +2,8 @@
 
 验证可重复的 --exclude-email 按 email 原文精确排除（区分大小写、
 不修剪空白）、共享邮箱全部排除而其他重复邮箱各自保留、保留记录按
-CSV 顺序从 preview-0001.txt 连续编号、全部被排除时仅生成计数为 0
+CSV 顺序从 preview-0001.txt 连续编号、报告以 excluded_contacts 按 CSV
+顺序逐项列出被移除记录的姓名与邮箱、全部被排除时仅生成计数为 0
 的报告，以及参数与输入校验失败时退出 2 且不留下输出。仅依赖 Python 3
 标准库，完全离线；样例联系人为合成数据，邮箱使用 RFC 2606 保留的
 example.invalid 虚构域名。
@@ -115,6 +116,14 @@ class ExcludeEmailTestCase(unittest.TestCase):
             report = json.load(fh)
         self.assertEqual(report["segment_count"], 3)
         self.assertEqual(report["excluded_count"], 2)
+        # 明细按 CSV 顺序逐条列出被移除记录，仅含 name 与 email。
+        self.assertEqual(
+            report["excluded_contacts"],
+            [
+                {"name": "甲", "email": EMAIL_A},
+                {"name": "乙", "email": EMAIL_A},
+            ],
+        )
         self.assertEqual(report["matched_count"], 1)
         self.assertEqual(
             report["previews"],
@@ -137,6 +146,14 @@ class ExcludeEmailTestCase(unittest.TestCase):
             report = json.load(fh)
         self.assertEqual(report["segment_count"], 3)
         self.assertEqual(report["excluded_count"], 2)
+        # 重复提供排除值不重复列出同一条记录。
+        self.assertEqual(
+            report["excluded_contacts"],
+            [
+                {"name": "甲", "email": EMAIL_A},
+                {"name": "乙", "email": EMAIL_A},
+            ],
+        )
         self.assertEqual(report["matched_count"], 1)
 
     def test_numbering_stays_contiguous_with_interleaved_exclusions(self):
@@ -167,6 +184,13 @@ class ExcludeEmailTestCase(unittest.TestCase):
             report = json.load(fh)
         self.assertEqual(report["segment_count"], 4)
         self.assertEqual(report["excluded_count"], 2)
+        self.assertEqual(
+            report["excluded_contacts"],
+            [
+                {"name": "甲", "email": EMAIL_A},
+                {"name": "丁", "email": EMAIL_A},
+            ],
+        )
         self.assertEqual(report["matched_count"], 2)
         self.assertEqual(
             report["previews"],
@@ -193,6 +217,14 @@ class ExcludeEmailTestCase(unittest.TestCase):
             report = json.load(fh)
         self.assertEqual(report["segment_count"], 3)
         self.assertEqual(report["excluded_count"], 3)
+        self.assertEqual(
+            report["excluded_contacts"],
+            [
+                {"name": "甲", "email": EMAIL_A},
+                {"name": "乙", "email": EMAIL_A},
+                {"name": "丙", "email": EMAIL_B},
+            ],
+        )
         self.assertEqual(report["matched_count"], 0)
         self.assertEqual(report["previews"], [])
 
@@ -210,6 +242,7 @@ class ExcludeEmailTestCase(unittest.TestCase):
             report = json.load(fh)
         self.assertEqual(report["segment_count"], 3)
         self.assertEqual(report["excluded_count"], 0)
+        self.assertEqual(report["excluded_contacts"], [])
         self.assertEqual(report["matched_count"], 3)
 
     def test_comparison_is_case_and_space_sensitive(self):
