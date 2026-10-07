@@ -1,262 +1,350 @@
 ================================================================
-邮件活动离线预览台 —— 最小预览流程说明（与当前源码一致）
+邮件活动离线预览台 —— 离线预览流程说明（与当前源码一致）
 ================================================================
 
-文档日期：2026-10-06
-核对基准：Git 提交 ac12284（工作区干净）。
+文档日期：2026-10-07
+核对基准：Git 提交 530427c（工作区干净）。
 源码范围：newsletter_preview/__main__.py、
           newsletter_preview/__init__.py（仅此两个文件）。
-分析范围：联系人 CSV → UTF-8 读取与完整校验 → 按 segment 筛选 →
-          {{name}} 姓名替换 → 逐人文本预览落盘 → report.json 报告，
-          仅此一条最小流程；不发送任何邮件。
+分析范围：联系人 CSV → UTF-8 读取（含起始 BOM 兼容）与完整校验 →
+          按 segment 筛选 → 按 --exclude-email 排除 →
+          {{name}}/{{email}}/{{segment}} 三变量替换 →
+          逐人文本预览落盘 → report.json 报告（含三个人数与排除
+          明细），仅此一条离线流程；不发送任何邮件。
 性质声明：本文只描述当前源码的实际行为，不补齐、不改变任何功能；
-README、产品代码、命令参数、输入输出格式与现有测试均未改动。
-下文源码位置均相对仓库根目录，行号对应提交 ac12284；`__init__.py`
-指 newsletter_preview/__init__.py，`__main__.py` 指
-newsletter_preview/__main__.py。
-第五节固定样例给出的命令与结果为“依据源码推导的预期结果”，不是
-某次实际运行的记录；验收时请按样例自行执行核对。
+README、产品代码、命令参数、输入输出格式与现有测试均未改动，本次
+仅更新本文。下文源码位置均相对仓库根目录，行号对应提交 530427c；
+`__init__.py` 指 newsletter_preview/__init__.py，`__main__.py`
+指 newsletter_preview/__main__.py。
+第五节固定样例给出的两条命令与全部结果均为“依据源码推导的预期
+结果”，不是某次实际运行的记录；验收时请按样例自行执行核对。
 
 ----------------------------------------------------------------
 一、公开入口与实际处理顺序
 ----------------------------------------------------------------
-公开入口（沿用 README 参数）：
+公开入口（沿用 README 参数形式）：
 
   python -m newsletter_preview \
       --contacts contacts.csv \
       --template template.txt \
       --segment newsletter \
-      --out previews
+      --out previews-a \
+      [--exclude-email EMAIL]...
 
-四个参数均为必需：--contacts（联系人 CSV）、--template（模板
-文本）、--segment（筛选值）、--out（输出目录）。参数定义见
-_build_parser（__init__.py:116-126，required=True 见 122-125）。
-入口链：__main__.py:7-8 以 sys.exit(main()) 调用 main()
-（__init__.py:129-162）。
+--contacts、--template、--segment、--out 四个参数必需；
+--exclude-email 可选、可重复提供，每次一个邮箱（action="append"，
+参数定义见 _build_parser，__init__.py:153-171，其中排除参数在
+163-170 行）。入口链：__main__.py:7-8 以 sys.exit(main()) 调用
+main()（__init__.py:174-221）。
 
-main() 中读取、校验、筛选、替换、报告写入的实际顺序
-（__init__.py:131-158，全部包在同一个 try 内）：
+main() 中校验、筛选、排除、替换、报告写入的实际顺序
+（__init__.py:176-217，业务步骤全部包在同一个 try 内）：
 
-  1. 读取联系人 CSV 文本（__init__.py:133，_read_text
-     定义于 26-36）；
-  2. 读取模板文本（__init__.py:134，同一函数）；
-  3. 解析并完整校验全部 CSV 行（__init__.py:135，
-     _parse_contacts 定义于 39-76）；
-  4. 校验模板占位符（__init__.py:136，_validate_template
-     定义于 79-86）；
-  5. 准备输出目录：不存在则创建，存在则要求为空且可写
-     （__init__.py:137，_prepare_out_dir 定义于 89-102）；
-  6. 按 segment 筛选（__init__.py:140）；
-  7. 按 CSV 顺序逐人替换并写预览文件（__init__.py:142-147，
-     写盘函数 _write_file 定义于 105-113），同时累积报告清单；
-  8. 组装报告并写 report.json（__init__.py:149-158）。
+  1. 校验 --exclude-email 取值并去重（__init__.py:178，
+     _normalize_excludes 定义于 139-150）；
+  2. 读取联系人 CSV 文本（__init__.py:179，_read_text 定义于
+     29-47，联系人文件开启起始 BOM 剥离）；
+  3. 读取模板文本（__init__.py:180，同一函数，模板不剥离 BOM）；
+  4. 解析并完整校验全部 CSV 行（__init__.py:181，_parse_contacts
+     定义于 50-87）；
+  5. 校验模板占位符（__init__.py:182，_validate_template 定义于
+     90-98）；
+  6. 准备输出目录：不存在则创建，存在则要求为空且可写
+     （__init__.py:183，_prepare_out_dir 定义于 106-125）；
+  7. 按 segment 等值筛选（__init__.py:188），再按排除邮箱集合
+     把命中记录分为保留 matched（189）与被排除 excluded（192），
+     统计三个计数（193-194、211）；
+  8. 仅对保留记录按 CSV 顺序逐人替换并写预览文件
+     （__init__.py:196-201；替换函数 _render 定义于 101-103，
+     写盘函数 _write_file 定义于 128-136），同时累积预览清单；
+  9. 组装报告并写 report.json（__init__.py:203-217）。
 
-成功返回 0（__init__.py:162）。任何一步抛出本模块的 InputError
-（__init__.py:22-23）都由 __init__.py:159-161 捕获，向标准错误
-输出一行“错误：……”，返回 2；标准输出不产生内容。
-argparse 层面的参数错误（缺参数等）由 argparse 在进入 try 之前
-自行处理，同样以退出码 2 终止（__init__.py:130），其标准错误为
-argparse 用法信息，不带“错误：”前缀。
+成功返回 0（__init__.py:221），标准输出与标准错误均为空。任何
+一步抛出本模块的 InputError（__init__.py:25-26）都由
+__init__.py:218-220 捕获，向标准错误输出一行“错误：……”，返回
+2；标准输出不产生内容，错误信息不含未捕获异常的 Traceback。
+argparse 层面的参数错误（缺必需参数、--exclude-email 后缺少值
+等）由 argparse 在进入 try 之前自行处理（__init__.py:175），
+同样以退出码 2 终止，其标准错误为 argparse 用法信息，不带
+“错误：”前缀，但会包含出错的参数名。
 
-关键次序结论：第 1-4 步（两份输入的读取与全部校验）全部先于
-第 5 步（创建/检查输出目录）。因此输入校验失败时，输出目录尚未
-被创建或写入（详见第四节与第六节）。
+关键次序结论：第 1-5 步（排除参数校验、两份输入的读取与全部
+校验）全部先于第 6 步（创建/检查输出目录）。因此输入或参数校验
+失败时，输出目录尚未被创建或写入（详见第四节与第六节）。
 
 ----------------------------------------------------------------
-二、读取与校验（第 1-4 步）
+二、读取与校验（第 1-5 步）
 ----------------------------------------------------------------
-2.1 UTF-8 输入
+2.1 UTF-8 输入与联系人文件起始 BOM
 
   两份输入均以 open(path, "r", encoding="utf-8", newline="")
-  读取（__init__.py:29）。文件不存在、无法以 UTF-8 解码或其他
-  读取错误一律转为 InputError（__init__.py:31-36），退出 2，
-  且发生在输出目录准备之前。写出同样使用 UTF-8 且 newline=""
-  （__init__.py:108），不做换行转换。
+  读取（__init__.py:37）。文件不存在、无法以 UTF-8 解码或其他
+  读取错误一律转为 InputError（39-44 行），退出 2，且发生在输出
+  目录准备之前。写出同样使用 UTF-8 且 newline=""（__init__.py:
+  131），不做换行转换。
+  仅联系人 CSV（strip_bom=True，__init__.py:179）在文件以一个
+  U+FEFF（字节 EF BB BF，UTF-8 BOM，常量见 22 行）开头时剥离
+  恰好这一个字符（45-46 行）；字段内部的 U+FEFF 属于正文，原样
+  保留。模板读取不走该选项（180 行），模板中任何位置的 U+FEFF
+  都按正文保留。
 
 2.2 必需字段与表头
 
-  CSV 首行必须是表头（空文件报错，__init__.py:43-47），且必须
-  包含 name、email、segment 三列（REQUIRED_COLUMNS 定义于
-  __init__.py:16；逐列检查于 49-56）。列顺序不限，额外列允许
-  存在但被忽略——记录只按列名取这三列（__init__.py:66）。
-  缺任一必需列即 InputError，错误信息给出实际表头（53-55）。
-  每一数据行的字段数必须与表头一致，否则报错（__init__.py:61-65）。
+  CSV 首行必须是表头（空文件报“缺少表头行”，__init__.py:54-58），
+  且必须包含 name、email、segment 三列（REQUIRED_COLUMNS 定义于
+  16 行；逐列检查于 61-67 行）。列顺序不限，额外列允许存在但被
+  忽略——记录只按列名取这三列（77 行）。缺任一必需列即
+  InputError，错误信息点名列名并给出实际表头（63-66 行）。
+  每一数据行的字段数必须与表头一致，否则报错并给出实际行号与
+  两边字段数（__init__.py:72-76）。CSV 词法错误由 csv.Error
+  捕获并转为 InputError（85-86 行）。
 
-2.3 未匹配行同样参与校验
+2.3 全部行先于筛选、排除接受校验
 
   _parse_contacts 先遍历并校验 CSV 的全部数据行、返回完整记录
-  列表（__init__.py:58-73），筛选在其后的第 6 步才发生
-  （__init__.py:140）。因此某行即使 segment 不等于筛选值、最终
-  不会生成预览，其 name、email、segment 字段为空或仅含空白时
-  仍会导致整体失败（逐字段检查见 67-72，行号取 reader.line_num）。
-  注意 .strip() 仅用于“是否为空”的判定（68 行），存入记录与
-  后续比较、替换使用的都是未修剪的原值。
-  CSV 词法错误由 csv.Error 捕获并转为 InputError（74-75）。
+  列表（__init__.py:70-84），筛选与排除都在其后的第 7 步才发生
+  （188-192 行）。因此无论某行最终是否命中分组、是否将被
+  --exclude-email 排除，其 name、email、segment 字段为空或仅含
+  空白时都会导致整体失败（逐字段检查见 78-83 行，行号取
+  reader.line_num）。.strip() 仅用于“是否为空”的判定（79 行），
+  存入记录（77 行）与后续比较、替换使用的都是未修剪的原值。
 
-2.4 模板占位符
+2.4 模板占位符：三个已知变量
 
   完整双花括号占位符由 PLACEHOLDER_RE = r"\{\{([^{}]*)\}\}"
-  识别（__init__.py:19）；只允许 {{name}}（KNOWN_PLACEHOLDER
-  定义于 17）。出现任何其他完整占位符（如 {{age}}）即 InputError，
-  信息中点名该变量（__init__.py:81-86）。未闭合或不成对的花括号
-  不匹配该正则，按普通文字保留。
+  识别（__init__.py:19）；允许的变量名恰为 name、email、segment
+  （KNOWN_PLACEHOLDERS 定义于 17 行）。三者可混合、可重复出现。
+  出现任何其他完整占位符（如 {{age}}、{{Name}}、{{ name }}、
+  {{}}）即 InputError，信息中点名该占位符原文，并附上支持列表
+  （__init__.py:92-98，支持列表由 95 行拼接）。未闭合或不成对的
+  花括号不匹配该正则，按普通文字保留。模板校验不依赖是否存在
+  命中记录：零命中时非法模板照样报错（校验在第 5 步、筛选在第
+  7 步，182 行先于 188 行）。
+
+2.5 --exclude-email 取值校验
+
+  _normalize_excludes（__init__.py:139-150）在所有文件读取之前
+  执行（178 行）：不提供该参数时返回空集合（145-146 行）；任一
+  值为空字符串或仅含空白即 InputError，错误信息点名参数
+  --exclude-email（147-149 行）。全部值按原文收进一个 frozenset
+  去重（150 行）：重复提供同一值不叠加任何效果。该步先于文件
+  读取，因此即使联系人文件不存在，空白排除值也会先以退出 2
+  失败。
 
 ----------------------------------------------------------------
-三、筛选与替换（第 6-7 步）：谁会看到哪份正文
+三、筛选、排除与替换：每条联系人记录的去向
 ----------------------------------------------------------------
-3.1 筛选语义
+3.1 分组筛选语义
 
   筛选就是一次 Python 字符串相等比较：
-  c["segment"] == args.segment（__init__.py:140）。
+  c["segment"] == args.segment（__init__.py:188，列表推导）。
   因此：
-  - 区分大小写："Newsletter" 不等于 "newsletter"，该联系人不
-    入选；
-  - 不修剪空白：CSV 中的值与命令行筛选值都按原文比较，
+  - 区分大小写："Newsletter" 不等于 "newsletter"，该记录不命中；
+  - 不修剪空白：CSV 值与命令行筛选值都按原文比较，
     "newsletter "（带尾空格）不匹配 "newsletter"；
   - 不做包含、前缀或任何归一化匹配。
 
-3.2 编号、顺序与共享邮箱
+3.2 邮箱排除语义
 
-  入选记录保持 CSV 中的出现顺序（__init__.py:140 列表推导），
-  自 1 起连续编号（enumerate(..., start=1)，__init__.py:142），
-  文件名格式 preview-{编号:04d}.txt（__init__.py:143），即
-  preview-0001.txt、preview-0002.txt……编号连续、不因未匹配行
-  留空号。
-  多条记录共享同一邮箱不做任何合并：每条入选记录各生成一份独立
-  预览、在报告清单中各占一项（循环逐条写入与追加见
-  __init__.py:142-147）。
+  排除集合是第 1 步得到的 frozenset；保留记录为
+  c["email"] not in excluded_emails（__init__.py:189），被排除
+  记录为 c["email"] in excluded_emails（192）。两次成员判断都是
+  Python 字符串精确比较：
+  - 区分大小写："Shared@example.invalid" 不等于
+    "shared@example.invalid"；
+  - 不修剪空白：邮箱字段与排除值的首尾空格都参与比较；
+  - 重复邮箱各算一条记录：多条记录共享同一邮箱时不合并，每条
+    命中记录各自进入保留或排除清单（计数按 CSV 数据记录统计、
+    不按唯一邮箱，见源码注释 186-187 行）；
+  - 重复排除值不叠加：同一邮箱在命令行写两遍与写一遍完全等价
+    （去重在 150 行），共享该邮箱的两条记录只各被排除一次，
+    排除数为 2 而非 4；
+  - 排除值不命中任何记录不是错误：行为与不提供该参数一致；
+  - 非命中分组的记录不计入排除明细，即使它的邮箱恰好出现在
+    排除集合中——排除明细 excluded 只从分组命中列表
+    segment_matched 中再次筛选（__init__.py:192 的遍历对象来自
+    188 行），分组未命中的记录在 188 行就已离开流程。
 
-3.3 替换与正文保留
+3.3 三个人数及其恒等关系
 
-  正文由 template_text.replace("{{name}}", contact["name"])
-  一次性生成（__init__.py:145）：
-  - 替换值（姓名）不再被解析：即使姓名里含有花括号文字，也不会
-    被当作占位符二次处理；
-  - 模板中除 {{name}} 以外的全部文字原样保留；
-  - 读写均以 newline="" 打开（29、108 行），换行与正文逐字节
+  segment_count = len(segment_matched)（__init__.py:193），
+  即排除前的分组命中记录数；
+  excluded_count = len(excluded)（194 行），即命中后被排除值
+  移除的记录数；
+  matched_count = len(matched)（211 行），即最终生成预览的
+  记录数。
+  因 matched 与 excluded 是 segment_matched 按同一排除集合做出
+  的互补划分（189、192 行），恒有：
+
+    segment_count == excluded_count + matched_count
+
+  三个人数都按 CSV 数据记录条数统计，不按唯一邮箱去重。
+
+3.4 编号、顺序与文件对应
+
+  入选（保留）记录保持 CSV 中的出现顺序（__init__.py:189 列表
+  推导保序），自 1 起连续编号（enumerate(matched, start=1)，
+  196 行），文件名格式 preview-{编号:04d}.txt（197 行），即
+  preview-0001.txt、preview-0002.txt……编号只对保留记录进行，
+  被排除记录与未命中记录都不留空号。写出的预览文件数、
+  matched_count、报告 previews 清单长度三者一一对应；同理
+  excluded_count 与 excluded_contacts 清单长度一一对应。
+
+3.5 替换与正文保留
+
+  正文由 _render 一次性扫描生成：
+  PLACEHOLDER_RE.sub(lambda m: record[m.group(1)], template)
+  （__init__.py:103，调用在 199 行）。由此：
+  - {{name}}、{{email}}、{{segment}} 分别取当前记录三个字段的
+    原文（未修剪、保留大小写与空白；{{segment}} 取该记录
+    segment 列原文，而不是命令行筛选值）；
+  - 替换值不再次解析：re.sub 单次扫描，即使字段值里含有
+    {{...}} 样式文字，也只作字面内容写入，不会被二次替换；
+  - 模板中除已知占位符以外的全部文字原样保留；
+  - 读写均以 newline="" 打开（37、131 行），正文与换行逐字节
     保留，模板末尾的换行同样保留。
 
-  由此可直接核对“谁会看到哪份正文”：第 N 个入选联系人的姓名被
-  写入 preview-000N.txt，邮箱与文件名的对应关系由报告清单给出
-  （3.4 与第五节表格）。
+3.6 报告内容
 
-3.4 报告内容（第 8 步）
-
-  报告为一个 JSON 对象（__init__.py:149-154），字段依次为：
-  - "template"：模板原文（template_text，含原始换行，150 行）；
-  - "segment"：命令行给出的筛选值原文（151 行）；
-  - "matched_count"：入选联系人数，len(matched)（152 行）；
-  - "previews"：清单，每项 {"email": ..., "file": ...}，
-    按生成顺序排列（147 行追加，153 行入报告）。
-  序列化用 json.dumps(..., ensure_ascii=False, indent=2) 并在
-  末尾补一个换行（__init__.py:155-158），中文不转义。
-  matched_count、previews 清单长度、实际写出的 preview 文件数
-  三者一一对应。零匹配时退出 0：不生成任何 preview 文件，只生成
-  report.json，其中 matched_count 为 0、previews 为空清单 []
-  （循环 142-147 一次不执行，报告仍在 155-158 写出）。
+  报告为一个 JSON 对象，按键插入顺序依次为
+  （__init__.py:203-213）：
+  - "template"：模板原文（含原始换行，204 行）；
+  - "segment"：命令行给出的筛选值原文（205 行）；
+  - "segment_count"：排除前分组命中记录数（206 行）；
+  - "excluded_count"：被排除记录数（207 行）；
+  - "excluded_contacts"：排除明细，每项
+    {"name": ..., "email": ...}，只存原始姓名与邮箱，按 CSV
+    顺序逐项列出（208-210 行；源列表在 192 行）；
+  - "matched_count"：最终预览人数（211 行）；
+  - "previews"：预览清单，每项 {"email": ..., "file": ...}，
+    按生成顺序排列（201 行追加，212 行入报告）。
+  序列化用 json.dumps(report, ensure_ascii=False, indent=2)
+  并在末尾补一个换行（__init__.py:214-217），中文不转义。
+  零命中或全部被排除时同样退出 0：预览循环（196-201 行）一次
+  不执行，目录中只有 report.json，其中 matched_count 为 0、
+  previews 为 []；零命中时 segment_count 与 excluded_count 均为
+  0、excluded_contacts 为 []；全部排除时 segment_count 与
+  excluded_count 仍如实记录排除前的命中数与排除数。
 
 ----------------------------------------------------------------
 四、输出目录与两类失败的区别
 ----------------------------------------------------------------
-4.1 输出目录规则（_prepare_out_dir，__init__.py:89-102）
+4.1 输出目录规则（_prepare_out_dir，__init__.py:106-125）
 
-  - 目录不存在：创建它（os.makedirs，99-102 行）；
-  - 路径已存在但不是目录：拒绝，InputError（92-93 行）；
-  - 目录已存在且非空：拒绝，InputError（94-95 行），退出 2，
-    目录中原有内容不变（程序在此中止，不会写任何文件）；
-  - 目录已存在、为空但不可写：拒绝，InputError（96-97 行）；
-  - 创建目录失败：InputError（99-102 行）。
-  写文件一律用 open(path, "x") 独占新建（__init__.py:108），
-  文件已存在也转为 InputError（110-111 行），不覆盖任何已有文件。
+  - 目录不存在：创建它（os.makedirs，121-125 行；零命中也会
+    创建，因为目录准备在筛选之前）；
+  - 路径已存在但不是目录：拒绝，InputError（108-110 行）；
+  - 目录已存在且非空：拒绝，InputError（117-118 行），退出 2，
+    目录中原有内容不变；
+  - 列目录本身失败（如权限不足）：InputError（111-116 行）；
+  - 目录已存在、为空但不可写：拒绝，InputError（119-120 行）；
+  - 创建目录失败：InputError（122-125 行）。
+  写文件一律用 open(path, "x") 独占新建（__init__.py:131），
+  文件已存在也转为 InputError（133-134 行），不覆盖任何已有
+  文件；其他操作系统层写错误同样转为 InputError（135-136 行）。
 
-4.2 输入校验失败：不产生任何输出
+4.2 输入与参数校验失败：不产生任何输出
 
-  读取失败、CSV 缺列/字段为空/字段数不一致/解析失败、模板含未知
-  变量，均发生在第 1-4 步，先于输出目录准备（__init__.py:133-136
-  对 137 行）。因此：
+  排除值校验、读取失败、CSV 缺列/字段为空/字段数不一致/解析
+  失败、模板含未知变量，均发生在第 1-5 步（__init__.py:178-182），
+  先于输出目录准备（183 行）。因此：
   - 若 --out 目录尚不存在，运行后仍不存在（不会被创建）；
-  - 若 --out 目录已存在且为空，运行后仍是空目录（不会留下文件）。
+  - 若 --out 目录已存在且为空，运行后仍是空目录（不会留下
+    文件）。
   非空目录拒绝（4.1）同样不改变其原有内容。
 
 4.3 写入失败：退出 2，但无回滚保证
 
-  第 7-8 步逐个写文件（__init__.py:142-147 写预览，155-158 写
+  第 8-9 步逐个写文件（__init__.py:196-201 写预览，214-217 写
   report.json）。若中途某个 _write_file 因操作系统层错误抛出
-  InputError（__init__.py:112-113），控制流同样跳到 159-161，
-  退出码仍为 2；但源码中没有任何删除或回滚逻辑——此前已经写出的
+  InputError（135-136 行），控制流同样跳到 218-220 行，退出码
+  仍为 2；但源码中没有任何删除或回滚逻辑——此前已经写出的
   预览文件会保留在输出目录中（例如报告写入失败时，此前写出的
-  preview 文件已全部存在）。因此“退出 2 且无输出”的结论只适用于
-  第 4.2 节的输入校验阶段；写入阶段失败后，目录可能处于部分写入
+  preview 文件已全部存在）。因此“退出 2 且无输出”的结论只适用
+  于第 4.2 节的校验阶段；写入阶段失败后目录可能处于部分写入
   状态，本文不承诺、源码也不提供原子性或回滚。
 
 ----------------------------------------------------------------
-五、固定样例：甲、乙、丙（预期结果，非实测记录）
+五、固定样例：甲、乙、丙、丁，两条命令（预期结果，非实测记录）
 ----------------------------------------------------------------
 以下为完整固定样例。联系人为合成数据，邮箱使用 RFC 2606 保留的
-example.invalid 虚构域名；甲、乙同属 newsletter 且共享同一邮箱，
-丙属 archive。预期结果逐字依据第一至四节引用的源码推导，可照此
-自行执行核对，但它不是某次运行的记录。
+example.invalid 虚构域名。甲、乙同属 newsletter 且共享邮箱
+shared@example.invalid，丙属 newsletter、邮箱
+bing@example.invalid，丁属 archive、邮箱 ding@example.invalid。
+下列命令、退出码、文件清单、预览正文与报告内容均逐字依据第一至
+四节引用的源码推导，可照此自行执行核对，但不是某次运行的记录。
 
 5.1 输入文件
 
-contacts.csv（UTF-8，首行表头，恰好三行数据）：
+contacts.csv（UTF-8，首行表头 name,email,segment，四行数据，
+每行均以 LF 结束）：
 
   name,email,segment
   甲,shared@example.invalid,newsletter
   乙,shared@example.invalid,newsletter
-  丙,bing@example.invalid,archive
+  丙,bing@example.invalid,newsletter
+  丁,ding@example.invalid,archive
 
-即：甲（第 2 行）与乙（第 3 行）segment 均为 newsletter、邮箱
-均为 shared@example.invalid；丙（第 4 行）segment 为 archive，
-邮箱 bing@example.invalid。
+template.txt（UTF-8，内容为下面一行正文，文件以恰好一个 LF
+结束；整文件共 39 个字符、59 字节）：
 
-template.txt（UTF-8，内容为“你好，{{name}}！”后接恰好一个
-换行；共 13 个字符、21 字节）：
-
-  你好，{{name}}！
+  你好，{{name}}！邮箱{{email}}，分组{{segment}}。
   （文件末尾一个换行）
 
-5.2 命令（与 README 相同的参数形式）
+每条记录在两条命令中的去向（分组命中判定与排除无关，对两条
+命令完全相同）：
+
+  CSV 行 | 姓名 | 邮箱                   | segment    | 分组命中 | 命令一去向（不排除） | 命令二去向（排除 shared）
+  ------+----+------------------------+------------+----+----------------------+------------------------
+   2    | 甲 | shared@example.invalid | newsletter | 是 | preview-0001.txt     | 排除明细第 1 项，无预览
+   3    | 乙 | shared@example.invalid | newsletter | 是 | preview-0002.txt     | 排除明细第 2 项，无预览
+   4    | 丙 | bing@example.invalid   | newsletter | 是 | preview-0003.txt     | preview-0001.txt
+   5    | 丁 | ding@example.invalid   | archive    | 否 | 不生成预览、不入明细 | 不生成预览、不入明细
+
+即丁在两条命令中都既不产生预览，也不进入 excluded_contacts；
+segment_count 都只数甲、乙、丙三条（3.2 节、__init__.py:188、
+192-193）。
+
+5.2 命令一：不排除任何邮箱，输出到独立空目录 previews-a
 
   python -m newsletter_preview \
       --contacts contacts.csv \
       --template template.txt \
       --segment newsletter \
-      --out previews
+      --out previews-a
 
-5.3 预期结果
+预期：退出码 0，标准输出、标准错误均为空（__init__.py:221；
+成功路径不打印）。previews-a/ 不存在时被创建，其中恰好四个
+文件：preview-0001.txt、preview-0002.txt、preview-0003.txt、
+report.json，无其他文件。
 
-  - 退出码 0，标准错误为空（__init__.py:162；成功路径不打印）；
-  - previews/ 目录在不存在时被创建，其中恰好三个文件：
-    preview-0001.txt、preview-0002.txt、report.json，无其他文件；
-  - preview-0001.txt 的完整内容为五个字符加一个换行（共 6 个
-    字符、16 字节）：
-      你好，甲！\n
-  - preview-0002.txt 的完整内容同样为五个字符加一个换行：
-      你好，乙！\n
-    两份正文均保留模板末尾的换行（__init__.py:145 配合 108 行
-    newline="" 写入）；
-  - 不为丙生成任何预览（"archive" != "newsletter"，
-    __init__.py:140）。
+三个计数依次为 segment_count=3、excluded_count=0、
+matched_count=3，满足 3 == 0 + 3（3.3 节）。
 
-  谁会看到哪份正文（编号、邮箱与正文的对应关系）：
+三份预览均保留模板末尾的 LF（__init__.py:199 配合 131 行
+newline="" 写入），完整正文分别为：
 
-    CSV 行 | 姓名 | 邮箱                    | segment    | 入选 | 文件              | 正文（含末尾换行）
-    ------+----+-------------------------+------------+----+-------------------+------------------
-     2    | 甲 | shared@example.invalid  | newsletter | 是 | preview-0001.txt | 你好，甲！\n
-     3    | 乙 | shared@example.invalid  | newsletter | 是 | preview-0002.txt | 你好，乙！\n
-     4    | 丙 | bing@example.invalid    | archive    | 否 | （不生成）        | （不生成）
+  preview-0001.txt（44 个字符、66 字节，含末尾换行）：
+    你好，甲！邮箱shared@example.invalid，分组newsletter。\n
+  preview-0002.txt（同上长度）：
+    你好，乙！邮箱shared@example.invalid，分组newsletter。\n
+  preview-0003.txt（42 个字符、64 字节，含末尾换行）：
+    你好，丙！邮箱bing@example.invalid，分组newsletter。\n
 
-  共享邮箱 shared@example.invalid 收到的是两条互相独立的记录，
-  对应两份不同正文，不合并、不去重（__init__.py:142-147）。
+甲、乙邮箱相同但各算一条记录：两份预览互相独立、编号不同、
+报告清单中各占一项，不合并、不去重（__init__.py:196-201）。
+不为丁生成任何预览（"archive" != "newsletter"，188 行）。
 
-  report.json 的完整预期内容（中文不转义、两空格缩进、文件末尾有
-  一个换行；__init__.py:155-158）：
+report.json 的完整预期内容（中文不转义、两空格缩进、文件末尾
+一个换行；__init__.py:214-217）：
 
   {
-    "template": "你好，{{name}}！\n",
+    "template": "你好，{{name}}！邮箱{{email}}，分组{{segment}}。\n",
     "segment": "newsletter",
-    "matched_count": 2,
+    "segment_count": 3,
+    "excluded_count": 0,
+    "excluded_contacts": [],
+    "matched_count": 3,
     "previews": [
       {
         "email": "shared@example.invalid",
@@ -265,89 +353,193 @@ template.txt（UTF-8，内容为“你好，{{name}}！”后接恰好一个
       {
         "email": "shared@example.invalid",
         "file": "preview-0002.txt"
+      },
+      {
+        "email": "bing@example.invalid",
+        "file": "preview-0003.txt"
       }
     ]
   }
 
-  "template" 保留模板原文（含 {{name}} 占位符与末尾换行），
-  "segment" 保留筛选值原文；matched_count 为 2，与清单两项、
-  两份预览文件严格对应；清单顺序即 CSV 顺序，邮箱与文件名一一
-  关联（__init__.py:147、149-154）。
+5.3 命令二：重复两次排除 shared@example.invalid，输出到另一
+    独立空目录 previews-b
+
+  python -m newsletter_preview \
+      --contacts contacts.csv \
+      --template template.txt \
+      --segment newsletter \
+      --out previews-b \
+      --exclude-email shared@example.invalid \
+      --exclude-email shared@example.invalid
+
+预期：退出码 0，标准输出、标准错误均为空。previews-b/ 中恰好
+两个文件：preview-0001.txt、report.json，无其他文件。
+
+三个计数依次为 segment_count=3、excluded_count=2、
+matched_count=1，满足 3 == 2 + 1（3.3 节）。排除值重复两次在
+_normalize_excludes 中被去重为一个集合元素
+（__init__.py:150），甲、乙两条记录各被排除一次，排除数为 2
+而非 4；排除明细依 CSV 顺序正是甲、乙两项（192、208-210 行）。
+保留记录中丙排第 1，因此唯一预览是丙的 preview-0001.txt
+（编号只对保留记录连续进行，196-197 行）。
+
+preview-0001.txt 的完整正文（42 个字符、64 字节，含末尾换行）：
+
+  你好，丙！邮箱bing@example.invalid，分组newsletter。\n
+
+report.json 的完整预期内容：
+
+  {
+    "template": "你好，{{name}}！邮箱{{email}}，分组{{segment}}。\n",
+    "segment": "newsletter",
+    "segment_count": 3,
+    "excluded_count": 2,
+    "excluded_contacts": [
+      {
+        "name": "甲",
+        "email": "shared@example.invalid"
+      },
+      {
+        "name": "乙",
+        "email": "shared@example.invalid"
+      }
+    ],
+    "matched_count": 1,
+    "previews": [
+      {
+        "email": "bing@example.invalid",
+        "file": "preview-0001.txt"
+      }
+    ]
+  }
+
+两条命令的人数与文件对应关系小结：
+
+  命令    | segment_count | excluded_count | matched_count | 预览文件数 | 报告
+  --------+---------------+----------------+---------------+------------+--------
+  命令一  |       3       |       0        |       3       |     3      | report.json
+  命令二  |       3       |       2        |       1       |     1      | report.json
+
+  - segment_count 只数分组命中的记录（甲、乙、丙），丁不计；
+  - excluded_count 等于 excluded_contacts 明细项数，且只可能
+    来自分组命中记录；
+  - matched_count 等于实际 preview 文件数，也等于 previews
+    清单项数；
+  - 零命中或全部被排除时命令仍退出 0，目录中只有 report.json
+    （3.6 节）。
 
 ----------------------------------------------------------------
-六、三类输入失败样例（预期结果，非实测记录）
+六、校验失败样例：退出 2 与错误点名（预期结果，非实测记录）
 ----------------------------------------------------------------
-下列三种输入均在第 3-4 步校验失败（先于输出目录准备），预期退出
-码 2；标准错误为一行“错误：……”且不含未捕获异常的 Traceback
-（__init__.py:159-161）；尚不存在的输出目录不会被创建，已存在的
-空目录保持为空（4.2 节）。除注明处外，其余输入沿用第五节。
+下列失败均发生在第 1-5 步（__init__.py:178-182），先于输出目录
+准备（183 行），预期退出码 2；标准错误为一行“错误：……”且不含
+未捕获异常的 Traceback（218-220 行）；尚不存在的输出目录不会被
+创建，已存在的空目录保持为空（4.2 节）。除注明处外，其余输入
+沿用第五节。
 
-6.1 模板含未知变量 {{age}}
+6.1 CSV 缺少必需列：错误点名列名
 
-  将 template.txt 改为在末尾换行前再加一行 {{age}}，例如内容为
-  “你好，{{name}}！\n{{age}}\n”。
-  触发点：_validate_template（__init__.py:81-86）。
-  预期标准错误：
-    错误：模板包含未知变量：{{age}}（仅支持 {{name}}）
-  即标准错误明确指出变量名 age。
-
-6.2 CSV 缺少 segment 列
-
-  将表头改为只有 name,email（删除 segment 整列），数据行相应去掉
-  分组字段：
+  将表头改为只有 name,email（删除 segment 整列），数据行相应
+  去掉分组字段：
     name,email
     甲,shared@example.invalid
     乙,shared@example.invalid
     丙,bing@example.invalid
-  触发点：_parse_contacts 必需列检查（__init__.py:49-56）。
+    丁,ding@example.invalid
+  触发点：_parse_contacts 必需列检查（__init__.py:61-67）。
   预期标准错误：
     错误：联系人 CSV 缺少必需列：segment（实际表头：name, email）
-  即标准错误明确指出缺失字段 segment，并附实际表头。
+  即明确指出缺失列 segment，并附实际表头。
 
-6.3 未匹配联系人丙的 name 为空
+6.2 必需字段为空：错误点名行号与字段（未命中、将被排除的行也
+    一样）
 
-  CSV 保持三列与三行，仅令第 4 行（archive 的丙）name 留空：
-    name,email,segment
-    甲,shared@example.invalid,newsletter
-    乙,shared@example.invalid,newsletter
-    ,bing@example.invalid,archive
-  尽管丙本不会被 newsletter 选中，全部行先于筛选接受校验
-  （2.3 节），仍整体失败。触发点：__init__.py:67-72。
-  预期标准错误：
-    错误：联系人 CSV 第 4 行必需字段 name 为空或仅含空白
-  即标准错误明确指出行号（第 4 行）与字段名 name。
+  全部数据行先于筛选与排除接受校验（2.3 节，__init__.py:70-84
+  对 188-192 行），两种“本来也不会出预览”的记录都不能豁免：
+  - 未命中行：令第 5 行（archive 的丁）name 留空
+    （",ding@example.invalid,archive"），即使丁本不命中
+    newsletter，仍整体失败；
+  - 将被排除的行：令甲的 name 留空
+    （",shared@example.invalid,newsletter"），同时以
+    --exclude-email shared@example.invalid 运行，即使甲本会被
+    排除，仍整体失败。
+  触发点：__init__.py:78-83。预期标准错误分别为：
+    错误：联系人 CSV 第 5 行必需字段 name 为空或仅含空白
+    错误：联系人 CSV 第 2 行必需字段 name 为空或仅含空白
+  即明确指出物理行号与字段名；判定只看 .strip() 是否为空
+  （79 行），字段原文若含空白仍会被存入记录。
 
-  对以上三种失败，分别观察两种输出目录状态，预期一致：
+6.3 模板含未知变量：错误点名变量
+
+  将模板改为含 {{age}}，例如内容为
+  “你好，{{name}}！邮箱{{email}}，分组{{segment}}。\n{{age}}\n”。
+  触发点：_validate_template（__init__.py:92-98）。预期标准错误：
+    错误：模板包含未知变量：{{age}}（仅支持 {{name}}、{{email}}、{{segment}}）
+  即明确指出占位符原文 {{age}} 与完整支持列表；即使联系人零
+  命中，该错误也照样发生（2.4 节）。
+
+6.4 空白排除值：错误点名排除参数
+
+  提供 --exclude-email ""（空字符串）或 --exclude-email "   "
+  （仅含空白）。触发点：_normalize_excludes（__init__.py:147-
+  149）。预期标准错误：
+    错误：--exclude-email 的值不能为空字符串或仅含空白
+  即明确点名参数 --exclude-email。该检查在一切文件读取之前
+  （178 行先于 179-182 行）。另外，--exclude-email 后根本不写
+  值属于 argparse 参数错误，argparse 在进入 try 之前即以退出码
+  2 终止（175 行），其用法信息同样包含 --exclude-email。
+
+  对以上四类失败，分别观察两种输出目录状态，预期一致：
   - --out 指向尚不存在的目录：退出 2 后该目录仍不存在；
   - --out 指向预先建好的空目录：退出 2 后该目录仍为空目录。
+  写入阶段（第 8-9 步）失败不受此保证保护：退出 2 的同时可能
+  已留下部分预览文件，且不会回滚（4.3 节）。
 
 ----------------------------------------------------------------
 七、验收对照
 ----------------------------------------------------------------
-- 处理顺序：__init__.py:131-158，依次为读 contacts（133）、
-  读 template（134）、解析校验 CSV（135）、校验模板（136）、
-  准备输出目录（137）、筛选（140）、逐人替换写预览（142-147）、
-  写报告（149-158）；入口 __main__.py:7-8。
-- UTF-8 与原样保留：__init__.py:29（读）、108（写），均为
-  encoding="utf-8"、newline=""。
-- 必需列与字段：__init__.py:16、49-56（缺列）、61-65（字段数）、
-  67-72（含未匹配行在内的空字段检查）。
-- 未知变量：__init__.py:19（正则）、79-86（仅允许 {{name}}）。
-- 区分大小写、不修剪空白的等值筛选：__init__.py:140。
-- 连续编号、CSV 顺序、共享邮箱不合并、替换值不再解析：
-  __init__.py:140-147（编号格式在 143，单次 replace 在 145）。
-- 报告保留模板原文与筛选值，人数与清单对应：
-  __init__.py:147、149-158；零匹配退出 0、仅写 matched_count=0、
-  previews=[] 的 report.json：142 行循环零次 + 155-158 行。
-- 目录创建/为空要求/非空拒绝且原内容不变：
-  __init__.py:89-102；独占新建不覆盖：105-113。
-- 校验失败不产生输出（133-136 先于 137）对比写入失败可能留下
-  已写出的文件、无回滚（142-147、155-161 中无删除逻辑）：
+- 处理顺序：__init__.py:176-217，依次为排除值校验（178）、
+  读 contacts（179）、读 template（180）、解析校验 CSV（181）、
+  校验模板（182）、准备输出目录（183）、分组筛选（188）、
+  邮箱排除与排除明细（189、192）、三个人数（193-194、211）、
+  逐人替换写预览（196-201）、写报告（203-217）；入口
+  __main__.py:7-8。
+- UTF-8、newline="" 与联系人起始 BOM：__init__.py:37（读）、
+  45-46（仅剥离文件开头一个 U+FEFF）、131（写）。
+- 必需列与字段：__init__.py:16、61-67（缺列点名）、72-76
+  （字段数）、78-83（含未命中行、将被排除行在内的空字段检查）。
+- 三个已知变量与未知变量点名：__init__.py:17、19（正则）、
+  92-98；单次扫描替换、替换值不再次解析、取字段原文：
+  101-103（_render，调用在 199）。
+- 区分大小写、不修剪空白：分组等值比较 __init__.py:188；
+  邮箱成员判断 189、192；空值判定才用 .strip()（79、148 行）。
+- 重复邮箱各算一条记录、重复排除值不叠加、非命中分组不入排除
+  明细：__init__.py:150（去重）、186-194。
+- 人数恒等式 segment_count == excluded_count + matched_count：
+  __init__.py:189、192-194、211；保留记录按 CSV 顺序连续编号：
+  196-197；人数、清单长度与文件数一一对应：201、208-212。
+- 报告七个字段及键顺序、排除明细只含 name/email、中文不转义、
+  末尾换行：__init__.py:203-217；零命中或全部排除仍退出 0、
+  只有报告：196-201 循环零次 + 214-217。
+- 目录创建/为空要求/非空拒绝且原内容不变：__init__.py:106-125；
+  独占新建不覆盖：128-136。
+- 校验失败不产生输出（178-182 先于 183）对比写入失败可能留下
+  已写出的文件、无回滚（196-217、218-220 中无删除逻辑）：
   见第四节。
-- 第五节、第六节的文件内容、命令、退出码、标准错误与输出清单均
-  可按所述输入原样复现；这些是依据源码给出的固定预期，不是实测
-  记录。
-- 现有黑盒回归测试 tests/test_preview_flow.py（运行方式
-  python -m unittest discover -s tests，见 tests/README.md）
-  覆盖成功样例与同类三类失败样例；本次未修改测试及任何产品代码。
+- 第五节、第六节的输入、命令、退出码、标准错误、文件清单、
+  预览正文与报告内容均可按所述原样复现；这些是依据源码给出的
+  固定预期，不是实测记录。
+- 现有黑盒回归测试（运行方式 python -m unittest discover -s
+  tests，见 tests/README.md）覆盖：成功流程与三类老失败样例
+  （tests/test_preview_flow.py）、--exclude-email 的排除明细、
+  共享邮箱、重复排除值、连续编号、全部排除、大小写与空白、
+  空白排除值、将被排除行仍受校验（tests/test_exclude_email.py）、
+  分组边界与零命中（tests/test_segment_boundary.py）、模板边界
+  （tests/test_template_boundary.py）、CSV 表头与引号字段边界
+  （tests/test_csv_structure_boundary.py）、联系人起始 BOM
+  （tests/test_contacts_bom.py）、输入读取失败
+  （tests/test_input_read_failure.py）、输出目录读取失败与输出
+  路径守卫（tests/test_output_dir_read_failure.py、
+  tests/test_output_path_guard.py）。本次未修改测试及任何产品
+  代码、命令参数或输出格式。
 ================================================================
