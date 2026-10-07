@@ -14,7 +14,7 @@ import re
 import sys
 
 REQUIRED_COLUMNS = ("name", "email", "segment")
-KNOWN_PLACEHOLDER = "name"
+KNOWN_PLACEHOLDERS = ("name", "email")
 # 完整双花括号占位符，如 {{name}}；不完整的（如单个 { 或未闭合）按普通文字处理。
 PLACEHOLDER_RE = re.compile(r"\{\{([^{}]*)\}\}")
 
@@ -77,13 +77,26 @@ def _parse_contacts(text):
 
 
 def _validate_template(template):
-    """校验模板中的完整双花括号占位符，仅允许 {{name}}。"""
+    """校验模板中的完整双花括号占位符，仅允许 {{name}} 与 {{email}}。"""
     for match in PLACEHOLDER_RE.finditer(template):
         variable = match.group(1)
-        if variable != KNOWN_PLACEHOLDER:
+        if variable not in KNOWN_PLACEHOLDERS:
+            supported = "、".join(f"{{{{{name}}}}}" for name in KNOWN_PLACEHOLDERS)
             raise InputError(
-                f"模板包含未知变量：{{{{{variable}}}}}（仅支持 {{{{{KNOWN_PLACEHOLDER}}}}}）"
+                f"模板包含未知变量：{{{{{variable}}}}}（仅支持 {supported}）"
             )
+
+
+def _render_template(template, contact):
+    """单遍替换模板中的已知占位符，取当前记录的原始字段值。
+
+    替换值本身不再解析：姓名或邮箱中看似占位符的文字原样保留；
+    其余正文与换行（LF/CRLF）保持原样。
+    """
+    def substitute(match):
+        return contact[match.group(1)]
+
+    return PLACEHOLDER_RE.sub(substitute, template)
 
 
 def _prepare_out_dir(path):
@@ -172,8 +185,8 @@ def main(argv=None):
         previews = []
         for number, contact in enumerate(matched, start=1):
             filename = f"preview-{number:04d}.txt"
-            # 一次性替换，替换值不再次解析；其余文字与换行原样保留。
-            content = template_text.replace("{{name}}", contact["name"])
+            # 单遍替换，替换值不再次解析；其余文字与换行原样保留。
+            content = _render_template(template_text, contact)
             _write_file(os.path.join(args.out, filename), content)
             previews.append({"email": contact["email"], "file": filename})
 
