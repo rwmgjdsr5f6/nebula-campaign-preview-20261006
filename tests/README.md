@@ -140,3 +140,28 @@ python -m unittest discover -s tests
   不需要管理员权限、不修改真实目录权限、不耗尽磁盘空间，也不依赖
   RLIMIT 等平台专用接口，核心用例在 Windows 与 Linux 上都不跳过。
 
+## report.json 创建成功后正文写入失败（`test_report_body_write_failure.py`）
+
+- 与上一节覆盖同一写入点的不同阶段：上一节在文件创建前（`open` 时）
+  失败，`report.json` 不存在；本节令 `report.json` 已成功创建后的
+  **第一次正文 `write`** 在写入任何字节前抛出
+  `OSError("report-body-write-denied")`，`open` 本身成功，其余文件
+  操作正常。
+- 固定合成输入、命令（开启 `--index`）与两种格式（默认文本、
+  `--format html`）均与上一节相同；每种格式先跑无故障对照（退出 0、
+  stdout/stderr 为空，目录恰含两份连续编号预览、`report.json` 与
+  `index.html`；报告计数 2、0、2，排除明细为空，预览清单按甲、乙
+  顺序对应邮箱与实际扩展名）。
+- 故障运行预期退出 2、stdout 为空，stderr 包含 `report.json` 完整
+  路径与该原因、无 Traceback；两份预览完整保留且与同格式对照逐字节
+  一致，`report.json` 存在但为零字节（创建成功、正文一字未写），
+  `index.html` 不存在（索引页在报告之后写出，报告失败即不执行），
+  目录没有其他文件，两份输入文件内容保持不变。
+- 注入机制同样为纯标准库、跨平台：`sitecustomize.py` 包装
+  `builtins.open`，对目标路径仍调用真实 `open`（文件以 `"x"` 成功
+  新建），再把返回对象包一层代理——代理的第一次 `write` 在转发前抛
+  `OSError`（任何字节都不落盘），上下文管理与其余属性原样转发，
+  `with` 块正常关闭该零字节文件；非目标路径完全不受影响。不依赖
+  管理员权限、真实权限变更、磁盘耗尽或平台专用接口，Windows 与
+  Linux 上核心用例均不跳过。
+
