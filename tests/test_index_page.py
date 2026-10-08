@@ -24,7 +24,10 @@ RLIMIT、信号或权限变更：把一个标准库 sitecustomize 模块放进�
 目录，仅在故障运行时 prepend 到子进程 PYTHONPATH，由解释器启动时的
 site 模块自动导入；该模块包装 builtins.open，仅对环境变量指定的
 index.html 目标路径在创建前抛出 PermissionError，其余调用原样转发，
-因此 Windows 与常见 Linux 环境行为一致，任何平台都不跳过。
+因此 Windows 与常见 Linux 环境行为一致，任何平台都不跳过。索引正文
+写入失败用例同理：另一个 sitecustomize 模块对目标路径返回包装对象，
+文件照常创建，但第一次 write 抛出 OSError，任何字节都未写入，索引页
+以零字节保留在输出目录中。
 
 从项目根目录执行：
 
@@ -68,6 +71,15 @@ SIMPLE_CONTACTS = (
 )
 SIMPLE_TEMPLATE = "你好，{{name}}！\n"
 
+# 索引正文写入失败用例的固定合成输入：两条记录 甲、乙 均属 newsletter
+# 分组，模板“你好，{{name}}！”以一个 LF 结束。
+BODY_CONTACTS = (
+    "name,email,segment\n"
+    "甲,a@example.invalid,newsletter\n"
+    "乙,b@example.invalid,newsletter\n"
+)
+BODY_TEMPLATE = "你好，{{name}}！\n"
+
 # 空格保留验收的固定合成输入：CSV 引号仅标示字段边界，不属于值；
 # 字段首尾与内部的普通空格 U+0020 必须按原数量在浏览器实际排版中
 # 保留（不折叠、不修剪、不替换为可见标记）。两条记录同属分组
@@ -90,6 +102,12 @@ SPACE_EMAIL_EXCLUDED = " b@example.invalid "
 DENY_REASON = "index-write-denied"
 # 向子进程传递目标 index.html 路径的环境变量名。
 DENY_PATH_ENV = "NEWSLETTER_PREVIEW_TEST_DENY_INDEX_PATH"
+
+# 索引正文写入失败用例注入的底层失败原因（固定），须原样出现在标准
+# 错误中。
+DENY_BODY_REASON = "index-body-write-denied"
+# 向子进程传递目标 index.html 路径的环境变量名（正文写入失败用例）。
+DENY_BODY_PATH_ENV = "NEWSLETTER_PREVIEW_TEST_DENY_INDEX_BODY_PATH"
 
 # 故障注入模块：仅在故障运行时通过 PYTHONPATH 进入子进程。site 模块在
 # 解释器启动时自动导入它；它包装 builtins.open，仅对环境变量指定的
@@ -120,6 +138,60 @@ if _TARGET:
 
     builtins.open = _guarded_open
 ''' % (DENY_PATH_ENV, DENY_REASON)
+
+# 故障注入模块（索引正文写入失败用例）：与上一模块同样经 PYTHONPATH
+# 与 site 机制进入子进程，但包装方式不同——对环境变量指定的目标路径
+# 照常调用真正的 open（文件因此创建成功），返回一个包装对象，其第一
+# 次 write 抛出 OSError，任何字节都未写入；其余 open 调用原样转发，
+# 因此输入读取、逐人预览与报告写入完全不受影响，目标文件以零字节保留。
+SITECUSTOMIZE_BODY_WRITE = '''\
+"""测试注入：仅对指定路径的第一次 write 抛出 OSError。"""
+import builtins
+import os
+
+_TARGET = os.environ.get(%r)
+
+if _TARGET:
+    _target = os.path.normcase(os.path.abspath(_TARGET))
+    _real_open = builtins.open
+
+    class _BodyWriteDenied:
+        """包装真实文件对象：创建照常，第一次 write 抛出 OSError。"""
+
+        def __init__(self, real):
+            self._real = real
+            self._writes = 0
+
+        def write(self, data):
+            if self._writes == 0:
+                self._writes += 1
+                raise OSError(%r)
+            return self._real.write(data)
+
+        def __enter__(self):
+            self._real.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._real.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    def _guarded_open(file, *args, **kwargs):
+        try:
+            path = os.fspath(file)
+        except TypeError:
+            path = None
+        if (
+            isinstance(path, str)
+            and os.path.normcase(os.path.abspath(path)) == _target
+        ):
+            return _BodyWriteDenied(_real_open(file, *args, **kwargs))
+        return _real_open(file, *args, **kwargs)
+
+    builtins.open = _guarded_open
+''' % (DENY_BODY_PATH_ENV, DENY_BODY_REASON)
 
 
 class _IndexParser(HTMLParser):
@@ -254,6 +326,16 @@ class IndexPageTestCase(unittest.TestCase):
             newline="",
         ) as fh:
             fh.write(SITECUSTOMIZE)
+        # 正文写入失败用例的注入目录，与上一目录互不混用。
+        self.inject_body_dir = os.path.join(self.tmp, "inject-body")
+        os.mkdir(self.inject_body_dir)
+        with open(
+            os.path.join(self.inject_body_dir, "sitecustomize.py"),
+            "w",
+            encoding="utf-8",
+            newline="",
+        ) as fh:
+            fh.write(SITECUSTOMIZE_BODY_WRITE)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -266,12 +348,15 @@ class IndexPageTestCase(unittest.TestCase):
 
     def _run(self, out_path, extra_args=(), fmt="html", index=True,
              contacts_path=None, template_path=None, segment=SEGMENT,
-             deny_index=False):
+             deny_index=False, deny_index_body=False):
         """通过 README 记载的公开入口运行，返回 CompletedProcess。
 
         fmt 为 None 时省略 --format（即默认 text 格式）。deny_index 为
         True 时启用 sitecustomize 注入，令该输出目录中 index.html 的
         创建在文件创建前以 PermissionError(DENY_REASON) 失败。
+        deny_index_body 为 True 时改用正文写入注入：index.html 创建
+        照常成功，第一次 write 以 OSError(DENY_BODY_REASON) 失败，
+        任何字节都未写入。两者互斥。
         """
         env = dict(os.environ)
         # 固定子进程 stdio 编码，保证各平台下 stderr 可按 UTF-8 解码。
@@ -280,6 +365,9 @@ class IndexPageTestCase(unittest.TestCase):
         if deny_index:
             pythonpath.insert(0, self.inject_dir)
             env[DENY_PATH_ENV] = os.path.join(out_path, "index.html")
+        if deny_index_body:
+            pythonpath.insert(0, self.inject_body_dir)
+            env[DENY_BODY_PATH_ENV] = os.path.join(out_path, "index.html")
         env["PYTHONPATH"] = (
             os.pathsep.join(pythonpath)
             + os.pathsep
@@ -1072,6 +1160,144 @@ class IndexPageTestCase(unittest.TestCase):
         # --format html：同上，保留的 .html 预览与报告与对照逐字节一致。
         control_out = self._run_index_control("html", "html", "html")
         self._run_index_denied("html", "html", "html", control_out)
+
+    def _run_body_control(self, label, fmt, extension):
+        """两条联系人固定输入的无故障对照：退出 0、stdio 全空，目录恰好
+        两份自 preview-0001 起连续编号的对应格式预览、report.json 与
+        index.html；报告计数 2、0、2，清单顺序与邮箱、文件扩展名正确，
+        预览正文替换姓名并保留末尾 LF。返回输出目录路径。"""
+        contacts_path = self._write(f"c-body-{label}.csv", BODY_CONTACTS)
+        template_path = self._write(f"t-body-{label}.txt", BODY_TEMPLATE)
+        out_path = os.path.join(self.tmp, f"out-body-{label}-control")
+        result = self._run(
+            out_path,
+            fmt=fmt,
+            contacts_path=contacts_path,
+            template_path=template_path,
+        )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stderr: {result.stderr.decode('utf-8', 'replace')}",
+        )
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"")
+
+        preview_names = [
+            f"preview-0001.{extension}",
+            f"preview-0002.{extension}",
+        ]
+        self.assertEqual(
+            sorted(os.listdir(out_path)),
+            ["index.html"] + preview_names + ["report.json"],
+        )
+
+        with open(os.path.join(out_path, "report.json"),
+                  encoding="utf-8") as fh:
+            report = json.load(fh)
+        self.assertEqual(
+            (report["segment_count"], report["excluded_count"],
+             report["matched_count"]),
+            (2, 0, 2),
+        )
+        self.assertEqual(
+            report["previews"],
+            [
+                {"email": "a@example.invalid", "file": preview_names[0]},
+                {"email": "b@example.invalid", "file": preview_names[1]},
+            ],
+        )
+
+        # 预览正文准确替换姓名并保留模板末尾的一个 LF。
+        if extension == "txt":
+            self.assertEqual(
+                self._read_bytes(out_path, preview_names[0]),
+                "你好，甲！\n".encode("utf-8"),
+            )
+            self.assertEqual(
+                self._read_bytes(out_path, preview_names[1]),
+                "你好，乙！\n".encode("utf-8"),
+            )
+        else:
+            for name, body in zip(preview_names, ("你好，甲！", "你好，乙！")):
+                doc = self._read_bytes(out_path, name).decode("utf-8")
+                self.assertTrue(doc.startswith("<!DOCTYPE html>"))
+                self.assertIn('<meta charset="utf-8">', doc)
+                self.assertIn(f"<pre>{body}\n</pre>", doc)
+        return out_path
+
+    def _run_index_body_denied(self, label, fmt, extension, control_out):
+        """index.html 创建成功后第一次正文写入以 OSError 失败：核对退出
+        结果与落盘状态，并与同格式对照逐字节比对保留的预览与报告。"""
+        contacts_path = self._write(f"c-body-{label}-deny.csv",
+                                    BODY_CONTACTS)
+        template_path = self._write(f"t-body-{label}-deny.txt",
+                                    BODY_TEMPLATE)
+        # 记录输入文件原始字节，故障运行后须逐字节不变。
+        with open(contacts_path, "rb") as fh:
+            contacts_before = fh.read()
+        with open(template_path, "rb") as fh:
+            template_before = fh.read()
+
+        out_path = os.path.join(self.tmp, f"out-body-{label}-denied")
+        result = self._run(
+            out_path,
+            fmt=fmt,
+            contacts_path=contacts_path,
+            template_path=template_path,
+            deny_index_body=True,
+        )
+
+        self.assertEqual(
+            result.returncode,
+            2,
+            msg=f"stderr: {result.stderr.decode('utf-8', 'replace')}",
+        )
+        self.assertEqual(result.stdout, b"", msg="故障时标准输出必须为空")
+        stderr = result.stderr.decode("utf-8")
+        index_path = os.path.join(out_path, "index.html")
+        # 标准错误点名 index.html 的完整目标路径与固定底层原因，无
+        # Traceback。
+        self.assertIn("无法写入输出文件", stderr)
+        self.assertIn(index_path, stderr)
+        self.assertIn(DENY_BODY_REASON, stderr)
+        self.assertNotIn("Traceback (most recent call last)", stderr)
+
+        # 目录恰好保留两份完整预览、完整报告与零字节索引页，没有其他
+        # 文件；预览与报告和同格式无故障对照逐字节一致。
+        preview_names = [
+            f"preview-0001.{extension}",
+            f"preview-0002.{extension}",
+        ]
+        self.assertEqual(
+            sorted(os.listdir(out_path)),
+            ["index.html"] + preview_names + ["report.json"],
+        )
+        self.assertEqual(self._read_bytes(out_path, "index.html"), b"")
+        for name in preview_names + ["report.json"]:
+            self.assertEqual(
+                self._read_bytes(out_path, name),
+                self._read_bytes(control_out, name),
+                msg=f"{name} 与同格式无故障结果不一致",
+            )
+
+        # 输入文件保持原样。
+        with open(contacts_path, "rb") as fh:
+            self.assertEqual(fh.read(), contacts_before)
+        with open(template_path, "rb") as fh:
+            self.assertEqual(fh.read(), template_before)
+
+    def test_index_body_write_failure_default_text_format(self):
+        # 默认文本格式（省略 --format）：无故障对照后，在另一空目录仅
+        # 令 index.html 创建成功后的第一次正文写入以 OSError 失败。
+        control_out = self._run_body_control("text", None, "txt")
+        self._run_index_body_denied("text", None, "txt", control_out)
+
+    def test_index_body_write_failure_html_format(self):
+        # --format html：同上，保留的 .html 预览与报告与对照逐字节一致。
+        control_out = self._run_body_control("html", "html", "html")
+        self._run_index_body_denied("html", "html", "html", control_out)
 
 
 if __name__ == "__main__":
