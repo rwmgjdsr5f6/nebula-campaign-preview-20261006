@@ -484,6 +484,46 @@ def _build_index(segment, segment_count, excluded_count, matched, previews,
     )
 
 
+# 离线核对清单 manifest.csv 的固定表头（仅此四列、此顺序）。
+MANIFEST_HEADER = ("name", "email", "segment", "preview_file")
+
+
+def _build_manifest(matched, previews):
+    """构建 manifest.csv 文本：固定表头加每条已生成预览记录一行。
+
+    清单为无 BOM 的 UTF-8 CSV（写出由 _write_file 以 UTF-8 完成）：
+    首行固定为 name,email,segment,preview_file，其后每行对应一条已
+    生成预览的联系人，记录保持 CSV 顺序，共享邮箱的联系人各占一行；
+    未命中分组或被任一排除来源（--exclude-email / --exclude-file）
+    移除的记录不进入清单。零命中或全部排除时只有表头一行。
+
+    前三列直接写输入 CSV 解析得到的 name、email、segment 原文：保留
+    中文、大小写、首尾空白与连续空格，不做任何修剪或替换；字段值中的
+    {{name}} 样式文字同样原样保留。末列只写同目录预览文件名（text
+    格式为 .txt、html 格式为 .html），与 report.json 的 previews 逐条
+    对应（matched 与 previews 同序、等长，逐对 zip 不会丢项）。
+
+    序列化使用 csv.writer 默认（RFC 4180）方言：逗号、双引号由写入器
+    按规则加引号并把字段内双引号翻倍，字段内换行整体加引号保留；配合
+    写出端 newline=""（见 _write_file），字段内换行不被改写，任何
+    CSV 解析器按 UTF-8、newline="" 读回都能恢复四个字段原值。行结束
+    为方言默认的 CRLF，表头与数据行一致。
+    """
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer)
+    writer.writerow(MANIFEST_HEADER)
+    for contact, preview in zip(matched, previews):
+        writer.writerow(
+            (
+                contact["name"],
+                contact["email"],
+                contact["segment"],
+                preview["file"],
+            )
+        )
+    return buffer.getvalue()
+
+
 def _prepare_out_dir(path):
     """输出目录不存在时创建；存在时要求为空目录且可写。不覆盖已有文件。"""
     if os.path.exists(path):
@@ -585,6 +625,20 @@ def _build_parser():
         "记录时显示空状态），并显示筛选值及分组命中、排除、最终预览"
         "三个计数；省略时不生成该文件，其余产物逐字节不变",
     )
+    parser.add_argument(
+        "--manifest",
+        action="store_true",
+        help="在输出目录额外生成 manifest.csv 离线核对清单（无 BOM 的 "
+        "UTF-8 CSV）：首行固定 name,email,segment,preview_file，其后"
+        "按 CSV 顺序每行列出一条已生成预览的联系人记录，前三列为输入 "
+        "CSV 的 name、email、segment 原文（保留中文、大小写、首尾空白"
+        "与连续空格；逗号、双引号与字段内换行经标准 CSV 转义，可解析"
+        "恢复原值；{{name}} 样式文字原样保留），末列仅写同目录预览"
+        "文件名（text 为 .txt、html 为 .html），与 report.json 的 "
+        "previews 逐条对应；共享邮箱的联系人各占一行，未命中分组或被"
+        "任一排除来源移除的记录不进入清单；零命中或全部排除时清单仅含"
+        "表头，仍退出 0。省略时不生成该文件，其余产物逐字节不变",
+    )
     return parser
 
 
@@ -645,8 +699,17 @@ def main(argv=None):
             os.path.join(args.out, "report.json"),
             json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         )
-        # 索引页最后写出：未开启 --index 时不走此步，已有预览与报告
-        # 与未开启时逐字节一致；写入失败同样退出 2，已写出的文件保留。
+        # 核对清单在报告之后、索引页之前写出：未开启 --manifest 时不走
+        # 此步，已有预览、报告与索引和未开启时逐字节一致；写入失败同样
+        # 退出 2（标准错误点名 manifest.csv 路径与底层原因，无
+        # Traceback），此前写出的文件允许保留，不回滚。
+        if args.manifest:
+            _write_file(
+                os.path.join(args.out, "manifest.csv"),
+                _build_manifest(matched, previews),
+            )
+        # 索引页最后写出：未开启 --index 时不走此步，已有预览、报告与
+        # 清单与未开启时逐字节一致；写入失败同样退出 2，已写出的文件保留。
         if args.index:
             _write_file(
                 os.path.join(args.out, "index.html"),

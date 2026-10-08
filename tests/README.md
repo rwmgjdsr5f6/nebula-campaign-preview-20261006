@@ -119,6 +119,34 @@ python -m unittest discover -s tests
   脚本无异常由实现时以 node 抽查，测试内以空数据岛模拟覆盖）；任何查询
   下三个计数与排除区域恒为完整结果。
 
+## `--manifest` 离线核对清单（`test_manifest.py`）
+
+- 四人验收样例（甲、乙共用 `a@example.invalid`，丙用 `b@example.invalid`，
+  前三人属 newsletter；丁用 `d@example.invalid` 属 archive），模板
+  “你好，{{name}}！”：`--exclude-email b@example.invalid --manifest
+  --index` 后退出 0、stdio 为空，目录恰含两份连续 `.txt` 预览、
+  `report.json`、`manifest.csv` 与 `index.html`；清单按顺序只列甲、乙，
+  分别对应 `preview-0001.txt`、`preview-0002.txt`，报告三计数 3、1、2，
+  被排除的丙与未命中的丁不进入清单。
+- 无 BOM 的 UTF-8 CSV：首字节不是 EF BB BF，首行固定
+  `name,email,segment,preview_file`，行结束为 CRLF；零命中与全部排除
+  均退出 0，清单逐字节仅含表头一行；`--format html` 时清单内容不变、
+  末列扩展名随之为 `.html`，磁盘上也只有 `.html` 预览。
+- 字段保真：姓名含逗号、双引号、字段内 LF，邮箱/分组含首尾与连续空格，
+  姓名为 `{{name}}` 样式文字时，清单经标准 CSV 解析后前三列与输入 CSV
+  原值逐字相等（加引号、双引号翻倍），原始字节中可见对应转义。
+- 排除来源与顺序：共享邮箱的记录各占一行且按 CSV 顺序排列；
+  `--exclude-file`（CRLF、空行）移除的记录同样不进入清单。
+- 逐字节不变：text/html 两种格式、是否同时 `--index`，开启 `--manifest`
+  时 `manifest.csv` 都是唯一新增文件，其余产物与未开启时逐字节一致。
+- 失败样例：输入缺列退出 2、输出目录不创建；输出目录非空退出 2、原文件
+  保留且不生成清单；对 `manifest.csv` 的 `open` 注入
+  `PermissionError("manifest-write-denied")` 时退出 2、stdout 为空，
+  stderr 包含完整 `manifest.csv` 路径与该原因、无 Traceback，此前写出的
+  预览与 `report.json` 保留，`manifest.csv` 与排在其后的 `index.html`
+  均不存在。注入机制为独立临时目录中的 `sitecustomize.py`，仅故障运行
+  prepend 到子进程 `PYTHONPATH`，纯标准库、跨平台。
+
 ## report.json 创建失败（`test_report_write_failure.py`）
 
 - 固定合成输入：contacts.csv 表头 `name,email,segment`，数据行
