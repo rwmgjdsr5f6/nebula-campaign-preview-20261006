@@ -176,6 +176,14 @@ INDEX_FIELD_CLASS = "field-value"
 # 保留清单搜索框（输入元素）的固定 id，也是页内 <label for> 与脚本
 # 查找的同一目标；初始不带 value 属性，故第一次打开时查询为空。
 INDEX_SEARCH_BOX_ID = "contact-search"
+# 搜索框旁“当前显示 n 条，共 m 条”计数中承载整句文字的 span 的固定
+# id：m（本次 matched_count）在生成时写死为实际数字，初始 n 与 m 相同；
+# n 的实际数字随句子一起由页内脚本在每次过滤后整体改写。
+INDEX_VISIBLE_COUNT_ID = "visible-count"
+# 计数句文案模板：{visible} 为当前可见保留记录数，{total} 为本次
+# matched_count，二者均为实际数字（共享邮箱逐条计数；表头、搜索无
+# 结果提示行及排除区域均不计入 {visible}）。
+INDEX_COUNT_TEMPLATE = "当前显示 {visible} 条，共 {total} 条"
 # 保留清单每一数据行 <tr> 的固定类名：脚本只凭该类收集参与搜索的
 # 行，已排除区域的行不带此类，永不参与过滤。
 INDEX_RETAINED_ROW_CLASS = "retained-row"
@@ -283,18 +291,31 @@ def _index_contact_table(header, rows, empty_message,
     )
 
 
-def _index_search_box():
-    """构建保留清单上方的离线搜索框：一个 label 与无初值文本输入框。
+def _index_search_box(matched_count):
+    """构建保留清单上方的离线搜索框：label、无初值文本输入框与计数。
 
     输入框不带 value 属性：页面第一次打开时查询为空，保留清单显示
     全部记录。输入框不放在 form 内，任何键入都不会触发提交或导航。
     搜索框是否渲染、能否输入与保留记录数无关——零命中或全部排除时
-    保留区域只有固定空状态段落，搜索框仍照常出现且可输入。
+    保留区域只有固定空状态段落，搜索框与计数仍照常出现且可输入。
+
+    输入框旁同一行（同一 contact-search 容器内）给出“当前显示 n 条，
+    共 m 条”：m 是本次 matched_count，n 是当前可见保留记录数。生成
+    时查询为空，全部保留行可见，故初始两数相同，均为 matched_count；
+    整句文字放在带固定 id 的 span 内，由页内搜索脚本在每次输入变化
+    时把可见行数（共享邮箱逐条计数；表头、搜索无结果提示行及排除
+    区域都不是保留数据行，不计入）连同固定文案整体改写。零命中或
+    全部排除（matched_count 为 0）时句子静态即为 0/0，输入任意查询
+    也始终如此（计数更新只在本地浏览器进行，不写文件、不请求网络）。
     """
+    count_text = INDEX_COUNT_TEMPLATE.format(
+        visible=matched_count, total=matched_count
+    )
     return (
         '<div class="contact-search">\n'
         f'<label for="{INDEX_SEARCH_BOX_ID}">搜索姓名或邮箱：</label>\n'
         f'<input type="text" id="{INDEX_SEARCH_BOX_ID}">\n'
+        f'<span id="{INDEX_VISIBLE_COUNT_ID}">{count_text}</span>\n'
         "</div>\n"
     )
 
@@ -316,8 +337,14 @@ def _index_search_script(matched):
     不做大小写归一或任何转义，故任意查询都合法），查询为空时全部保留
     行可见；非空时仅当本行姓名或邮箱原文以 indexOf 包含整个查询字符串
     才可见，其余行加 hidden，查询非空且零命中时显示表体末尾的固定提示
-    行。三个计数与“已排除的联系人”区域不属于脚本操作对象：排除清单
-    的行不带 retained-row 类，永不被收集或改写。
+    行。每次过滤后还把搜索框旁的计数句整体改写为“当前显示 n 条，共
+    m 条”：n 是这一轮统计出的可见保留行数（与实际未加 hidden 的
+    retained-row 行严格一致；共享邮箱逐条计数，表头行、搜索无结果提示
+    行与排除区域的行都不在 rows 中，永不计入），m 是本次 matched_count
+    （即数据岛与保留行总数，不随查询变化）。三个分组计数与“已排除的
+    联系人”区域不属于脚本操作对象：排除清单的行不带 retained-row 类，
+    永不被收集或改写。计数更新只改 DOM 文本：不写任何文件、不发起
+    任何请求。
     """
     fields = [[contact["name"], contact["email"]] for contact in matched]
     payload = json.dumps(fields, ensure_ascii=False)
@@ -340,9 +367,12 @@ def _index_search_script(matched):
         f'"{INDEX_SEARCH_BOX_ID}");\n'
         f"var emptyRow = document.getElementById("
         f'"{INDEX_SEARCH_EMPTY_ID}");\n'
+        f"var countBox = document.getElementById("
+        f'"{INDEX_VISIBLE_COUNT_ID}");\n'
         "var rows = Array.prototype.slice.call(\n"
         f'document.getElementsByClassName("{INDEX_RETAINED_ROW_CLASS}"));\n'
         f"var fields = {payload};\n"
+        "var totalCount = fields.length;\n"
         "function applyFilter() {\n"
         "  var query = box.value;\n"
         "  var index;\n"
@@ -360,6 +390,10 @@ def _index_search_script(matched):
         "  if (emptyRow !== null) {\n"
         "    emptyRow.hidden = query === '' || visible !== 0;\n"
         "  }\n"
+        "  if (countBox !== null) {\n"
+        '    countBox.textContent = "当前显示 " + visible + " 条，共 "\n'
+        '      + totalCount + " 条";\n'
+        "  }\n"
         "}\n"
         'box.addEventListener("input", applyFilter);\n'
         "applyFilter();\n"
@@ -375,14 +409,19 @@ def _build_index(segment, segment_count, excluded_count, matched, previews,
     页面展示筛选值与分组命中、排除、最终预览三个记录数（与报告同
     源），计数始终描述完整生成结果，不随搜索变化。计数段落之后是
     保留清单的离线搜索框（见 _index_search_box）：初始为空、显示
-    全部保留行；用户输入变化时由页尾内联脚本（_index_search_script）
-    即时改变保留行的可见性——姓名或邮箱任一原始字段包含整个查询字
-    串（区分大小写、不修剪首尾空白、不折叠连续空格）即显示，不匹配
-    的行仅加 hidden，非空查询零命中时显示表体末尾的固定提示“没有
-    符合搜索条件的联系人”，清空查询恢复全部行。搜索只操作保留清单：
-    三个计数与“已排除的联系人”区域（含全部排除条目）在任何查询下
-    都不变；共享邮箱的每条记录在数据岛中各占一项，过滤后仍是独立
-    条目，CSV 顺序与同目录相对预览链接不变。
+    全部保留行，框旁同句给出“当前显示 n 条，共 m 条”——初始查询
+    为空故 n 与 m 相同（均为 len(matched)）；用户输入变化时由页尾
+    内联脚本（_index_search_script）在改变保留行可见性的同时把 n
+    改写为当前可见行数、m 始终为 matched_count，清空查询即恢复
+    n == m。姓名或邮箱任一原始字段包含整个查询字符串（区分大小写、
+    不修剪首尾空白、不折叠连续空格）即显示，不匹配的行仅加 hidden，
+    非空查询零命中时显示表体末尾的固定提示“没有符合搜索条件的
+    联系人”。n 逐条统计可见的保留数据行：共享邮箱的每条记录各计
+    一次，表头行、搜索无结果提示行与“已排除的联系人”区域都不计入。
+    搜索只操作保留清单：三个分组计数与“已排除的联系人”区域（含
+    全部排除条目）在任何查询下都不变；共享邮箱的每条记录在数据岛
+    中各占一项，过滤后仍是独立条目，CSV 顺序与同目录相对预览链接
+    不变。
 
     保留联系人清单按 CSV 顺序列出每条保留记录的原始姓名、邮箱及预览
     链接；其后追加“已排除的联系人”区域，按 CSV 顺序逐条列出命中分组
@@ -403,7 +442,8 @@ def _build_index(segment, segment_count, excluded_count, matched, previews,
     不生成 mailto 等任何非文件链接；链接 href 只写同目录预览文件名，
     输出目录整体移动后仍可打开。matched 为空（零命中或全部排除）时
     保留清单区域不生成表格，固定显示“没有可预览的联系人”且不含任何
-    预览链接，搜索框仍可输入；零命中时两个空状态同时出现。文档不
+    预览链接，搜索框仍可输入，计数句静态即为“当前显示 0 条，共 0
+    条”且输入任意查询都保持 0/0；零命中时两个空状态同时出现。文档不
     引用任何网络资源，搜索脚本同样完全内联、无网络请求。
     """
     retained_rows = [
@@ -445,7 +485,7 @@ def _build_index(segment, segment_count, excluded_count, matched, previews,
         f'<p class="{INDEX_FIELD_CLASS}">筛选值：{_esc(segment)}</p>\n'
         f"<p>分组命中：{segment_count}；排除：{excluded_count}；"
         f"最终预览：{len(matched)}</p>\n"
-        f"{_index_search_box()}"
+        f"{_index_search_box(len(matched))}"
         f"{listing}\n"
         "<h2>已排除的联系人</h2>\n"
         f"{excluded_listing}\n"
@@ -545,13 +585,16 @@ def _build_parser():
         action="store_true",
         help="在输出目录额外生成 index.html：先按 CSV 顺序列出保留记录"
         "的原始姓名、邮箱与相对预览链接，并提供一个完全离线的搜索框"
-        "（初始为空显示全部；输入即时过滤保留行，姓名或邮箱原文包含"
-        "整个查询即显示，区分大小写、不修剪空白；非空查询零命中时"
-        "显示固定提示，清空恢复全部；搜索不改变计数与排除区域），再"
-        "以内容、顺序与报告 excluded_contacts 一致的“已排除的联系人”"
-        "区域逐条列出被排除记录（仅文字，无预览或邮件链接，无排除"
-        "记录时显示空状态），并显示筛选值及分组命中、排除、最终预览"
-        "三个计数；省略时不生成该文件，其余产物逐字节不变",
+        "（框旁同句显示“当前显示 n 条，共 m 条”：初始为空时 n 与 m "
+        "相同、均为最终预览人数；输入即时过滤保留行并把 n 同步为"
+        "可见行数，m 恒为最终预览人数，清空恢复；零命中或全部排除时"
+        "始终为 0/0。姓名或邮箱原文包含整个查询即显示，区分大小写、"
+        "不修剪空白；非空查询零命中时显示固定提示，清空恢复全部；"
+        "搜索不改变三个分组计数与排除区域），再以内容、顺序与报告 "
+        "excluded_contacts 一致的“已排除的联系人”区域逐条列出被排除"
+        "记录（仅文字，无预览或邮件链接，无排除记录时显示空状态），"
+        "并显示筛选值及分组命中、排除、最终预览三个计数；省略时不"
+        "生成该文件，其余产物逐字节不变",
     )
     return parser
 

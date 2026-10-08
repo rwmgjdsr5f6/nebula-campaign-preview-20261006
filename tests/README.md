@@ -119,6 +119,31 @@ python -m unittest discover -s tests
   脚本无异常由实现时以 node 抽查，测试内以空数据岛模拟覆盖）；任何查询
   下三个计数与排除区域恒为完整结果。
 
+## `--index` 搜索框可见计数（`test_index_visible_count.py`）
+
+- 用户验收固定样例：甲、乙共用 `shared@example.invalid`，丙用
+  `b@example.invalid`，丁用 `cut@example.invalid`，四人均属 newsletter；
+  模板逐字为“你好，{{name}}！”（无末尾换行）。`--exclude-email
+  cut@example.invalid --index` 后退出 0，分组命中、排除、最终预览依次
+  为 4、1、3，搜索框旁计数 span 初始静态为“当前显示 3 条，共 3 条”，
+  同目录 `.txt` 相对链接与 CSV 顺序不变。
+- 静态契约：计数句是 `contact-search` 容器内 label、input 之后唯一一个
+  带固定 id 的 span；页面唯一内联脚本按该 id 取节点（容忍缺失），以
+  `var totalCount = fields.length` 固定 m，过滤循环统计 visible 后以
+  `textContent` 把整句改写为三段固定文字拼接 visible/totalCount 的
+  结果；脚本不含任何查询归一处理与可发起请求的标记；落盘页面只含初始句
+  一处（键入结果不烘焙进文件）。
+- 数据驱动模拟：从真实页面解析 `var fields` 数据岛与脚本中计数句的三段
+  真实文字，按与脚本逐行对应的子串规则逐查询拼句断言：初始/清空为
+  “当前显示 3 条，共 3 条”，输入 `shared` 为“当前显示 2 条，共 3 条”，
+  输入 `zzz` 为“当前显示 0 条，共 3 条”且表体显示“没有符合搜索条件的
+  联系人”；另核区分大小写（`Shared` 零命中）、排除区域的丁不计入 n
+  （`cut` 亦为 0/3）与 `b@` 为 1/3。
+- `--format html` 计数与默认 text 一致，仅链接为 `.html`。零分组命中与
+  全部排除时计数始终静态为“当前显示 0 条，共 0 条”，任意查询模拟下
+  保持 0/0，保留区域只有“没有可预览的联系人”（全部排除时排除区域四人
+  仍齐全且不入数据岛）。
+
 ## report.json 创建失败（`test_report_write_failure.py`）
 
 - 固定合成输入：contacts.csv 表头 `name,email,segment`，数据行
