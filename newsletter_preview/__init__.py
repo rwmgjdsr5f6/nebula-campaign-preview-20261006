@@ -173,6 +173,19 @@ def _wrap_html(body):
 # 索引页中需要按原文保留空格的元素共用的类名：筛选值段落与两类
 # 联系人清单的姓名、邮箱单元格带此类（表头与“预览”链接单元格不带）。
 INDEX_FIELD_CLASS = "field-value"
+# 保留清单搜索框（输入元素）的固定 id，也是页内 <label for> 与脚本
+# 查找的同一目标；初始不带 value 属性，故第一次打开时查询为空。
+INDEX_SEARCH_BOX_ID = "contact-search"
+# 保留清单每一数据行 <tr> 的固定类名：脚本只凭该类收集参与搜索的
+# 行，已排除区域的行不带此类，永不参与过滤。
+INDEX_RETAINED_ROW_CLASS = "retained-row"
+# 保留清单表体末尾“搜索无结果”提示行的固定 id 与文案。该行初始带
+# hidden（布尔属性），仅当查询非空且没有任何保留行命中时由脚本展示；
+# 它不是数据行：无 data-* 字段、不带 retained-row 类、不含预览链接。
+INDEX_SEARCH_EMPTY_ID = "search-empty-row"
+INDEX_SEARCH_EMPTY_MESSAGE = "没有符合搜索条件的联系人"
+# 保留区域没有任何记录（零命中或全部排除）时的固定空状态文案。
+INDEX_NO_PREVIEW_MESSAGE = "没有可预览的联系人"
 
 
 def _esc(value):
@@ -204,7 +217,7 @@ def _index_style_block():
     )
 
 
-def _index_contact_row(cells, link=None):
+def _index_contact_row(cells, link=None, retained=False):
     """构建清单中的一条 <tr>：姓名、邮箱单元格共用，可选第三列链接。
 
     cells 为已按 CSV 顺序取好的单元格原文序列（保留清单为姓名、
@@ -213,34 +226,145 @@ def _index_contact_row(cells, link=None):
     link 给定时（仅保留清单）追加同目录预览文件名的相对链接单元
     格，文件名同样转义；该单元格维持普通排版、不带预排版类。排除
     清单不传，故无 a 元素、无 mailto。
+
+    retained 为 True 时（仅保留清单的数据行）在 <tr> 上加
+    INDEX_RETAINED_ROW_CLASS 类：页内离线脚本只收集带该类的行并按
+    嵌入的原始姓名、邮箱控制其 hidden，故排除清单的行永不带此类、
+    不参与搜索；“搜索无结果”提示行同样不带类。
     """
-    row = "".join(
+    tag = (
+        f'<tr class="{INDEX_RETAINED_ROW_CLASS}">'
+        if retained
+        else "<tr>"
+    )
+    row = tag + "".join(
         f'<td class="{INDEX_FIELD_CLASS}">{_esc(cell)}</td>'
         for cell in cells
     )
     if link is not None:
         row += f'<td><a href="{_esc(link)}">预览</a></td>'
-    return f"<tr>{row}</tr>"
+    row += "</tr>"
+    return row
 
 
-def _index_contact_table(header, rows, empty_message):
+def _index_contact_table(header, rows, empty_message,
+                         search_empty_message=None):
     """构建两类联系人清单共享的表格或固定空状态。
 
     header 为表头单元格文字（两类清单的“姓名”“邮箱”列一致，保留
     清单额外有“预览”列）；rows 为 _index_contact_row 已生成的行
     HTML。无行时不生成表格，返回固定空状态段落；有行时输出与原先
     逐清单手写形式完全一致的 table/thead/tbody 结构与换行。
+
+    search_empty_message 给定时（仅保留清单）在表体末尾追加一个
+    初始带 hidden 的提示行，跨全部列显示该文案：它不是数据行
+    （不带 INDEX_RETAINED_ROW_CLASS、无字段与链接），仅由页内搜索
+    脚本在查询非空且零命中时取消隐藏；查询为空或存在可见行时始终
+    隐藏。
     """
     if not rows:
         return f"<p>{empty_message}</p>"
     head = "".join(f"<th>{column}</th>" for column in header)
+    body = "\n".join(rows)
+    if search_empty_message is not None:
+        body += (
+            "\n"
+            f'<tr id="{INDEX_SEARCH_EMPTY_ID}" hidden>'
+            f'<td colspan="{len(header)}">{search_empty_message}</td>'
+            "</tr>"
+        )
     return (
         "<table>\n"
         f"<thead><tr>{head}</tr></thead>\n"
         "<tbody>\n"
-        + "\n".join(rows)
+        + body
         + "\n</tbody>\n"
         "</table>"
+    )
+
+
+def _index_search_box():
+    """构建保留清单上方的离线搜索框：一个 label 与无初值文本输入框。
+
+    输入框不带 value 属性：页面第一次打开时查询为空，保留清单显示
+    全部记录。输入框不放在 form 内，任何键入都不会触发提交或导航。
+    搜索框是否渲染、能否输入与保留记录数无关——零命中或全部排除时
+    保留区域只有固定空状态段落，搜索框仍照常出现且可输入。
+    """
+    return (
+        '<div class="contact-search">\n'
+        f'<label for="{INDEX_SEARCH_BOX_ID}">搜索姓名或邮箱：</label>\n'
+        f'<input type="text" id="{INDEX_SEARCH_BOX_ID}">\n'
+        "</div>\n"
+    )
+
+
+def _index_search_script(matched):
+    """构建页尾内联搜索脚本（无 src、无网络请求），数据岛内嵌原字段。
+
+    参与匹配的原始姓名、邮箱按 CSV 顺序以 JSON 数组嵌入脚本，与表体
+    中带 INDEX_RETAINED_ROW_CLASS 的数据行一一平行；搜索只在浏览器
+    本地进行，不写任何文件、不发起任何请求。原始字段中的 < 与 > 在
+    脚本数据岛内一律写成 U 转义（& 以及 U+2028/U+2029 同样转义，引号
+    为 JSON 自带的 \"）：字段里的尖括号、引号、</script> 样式文字与
+    {{name}} 都不可能终止脚本块或成为页面元素，浏览器按 JS 字符串
+    规则把转义逐字还原为原字段，参与比较的仍是未修剪、未折叠、区分
+    大小写的原文。
+
+    过滤规则完全在客户端即时完成：监听输入框的 input 事件，每次输入
+    变化直接取 box.value 作为查询（不修剪首尾空白、不折叠连续空格、
+    不做大小写归一或任何转义，故任意查询都合法），查询为空时全部保留
+    行可见；非空时仅当本行姓名或邮箱原文以 indexOf 包含整个查询字符串
+    才可见，其余行加 hidden，查询非空且零命中时显示表体末尾的固定提示
+    行。三个计数与“已排除的联系人”区域不属于脚本操作对象：排除清单
+    的行不带 retained-row 类，永不被收集或改写。
+    """
+    fields = [[contact["name"], contact["email"]] for contact in matched]
+    payload = json.dumps(fields, ensure_ascii=False)
+    # 此时 payload 是完整合法 JSON：尖括号等字符只会出现在字符串值
+    # 内部，把这些原字符替换成等价的 JS/JSON 字符串转义后仍合法；
+    # 还原结果与原字段逐字相等。
+    payload = (
+        payload
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+    return (
+        "<script>\n"
+        "(function () {\n"
+        '"use strict";\n'
+        f"var box = document.getElementById("
+        f'"{INDEX_SEARCH_BOX_ID}");\n'
+        f"var emptyRow = document.getElementById("
+        f'"{INDEX_SEARCH_EMPTY_ID}");\n'
+        "var rows = Array.prototype.slice.call(\n"
+        f'document.getElementsByClassName("{INDEX_RETAINED_ROW_CLASS}"));\n'
+        f"var fields = {payload};\n"
+        "function applyFilter() {\n"
+        "  var query = box.value;\n"
+        "  var index;\n"
+        "  var show;\n"
+        "  var visible = 0;\n"
+        "  for (index = 0; index < rows.length; index += 1) {\n"
+        "    show = query === '' ||\n"
+        "      fields[index][0].indexOf(query) !== -1 ||\n"
+        "      fields[index][1].indexOf(query) !== -1;\n"
+        "    rows[index].hidden = !show;\n"
+        "    if (show) {\n"
+        "      visible += 1;\n"
+        "    }\n"
+        "  }\n"
+        "  if (emptyRow !== null) {\n"
+        "    emptyRow.hidden = query === '' || visible !== 0;\n"
+        "  }\n"
+        "}\n"
+        'box.addEventListener("input", applyFilter);\n'
+        "applyFilter();\n"
+        "}());\n"
+        "</script>\n"
     )
 
 
@@ -249,43 +373,56 @@ def _build_index(segment, segment_count, excluded_count, matched, previews,
     """构建 index.html：声明 UTF-8 的完整离线索引文档。
 
     页面展示筛选值与分组命中、排除、最终预览三个记录数（与报告同
-    源）。保留联系人清单按 CSV 顺序列出每条保留记录的原始姓名、
-    邮箱及预览链接；其后追加“已排除的联系人”区域，按 CSV 顺序逐条
-    列出命中分组后被排除名单（--exclude-email / --exclude-file）
-    移除的记录（与报告 excluded_contacts 同内容、同顺序，条目数
-    等于 excluded_count；未命中分组的记录不出现，共享邮箱的每条
-    记录各列一项，重复排除值不重复增加条目），每条只显示原始姓名
-    与邮箱文字，不提供预览或邮件链接；没有排除记录时显示固定空
-    状态。姓名、邮箱的转义与表格/空状态拼装由 _index_contact_row
-    与 _index_contact_table 统一承担，两类清单不再各自维护同一套
-    呈现逻辑；它们的差异只在调用处声明：保留清单多一个“预览”表
-    头并传入同目录预览文件名作为第三列相对链接，排除清单不传链
-    接。筛选值段落与两类清单的姓名、邮箱单元格带预排版类，配合
-    head 中的本地样式块（white-space: pre-wrap，见
-    _index_style_block）在浏览器排版中按原数量保留首尾与连续的
-    普通空格 U+0020；空格不修剪、不替换为 &nbsp; 等可见标记，
-    表头与“预览”链接单元格维持普通排版。保留清单中的邮箱仅作
-    文字展示，不生成 mailto 等任何非文件
-    链接；链接 href 只写同目录预览文件名，输出目录整体移动后仍可
-    打开。matched 为空（零命中或全部排除）时保留清单区域显示固定
-    提示且不含任何预览链接；零命中时两个空状态同时出现。文档不
-    引用任何网络资源。
+    源），计数始终描述完整生成结果，不随搜索变化。计数段落之后是
+    保留清单的离线搜索框（见 _index_search_box）：初始为空、显示
+    全部保留行；用户输入变化时由页尾内联脚本（_index_search_script）
+    即时改变保留行的可见性——姓名或邮箱任一原始字段包含整个查询字
+    串（区分大小写、不修剪首尾空白、不折叠连续空格）即显示，不匹配
+    的行仅加 hidden，非空查询零命中时显示表体末尾的固定提示“没有
+    符合搜索条件的联系人”，清空查询恢复全部行。搜索只操作保留清单：
+    三个计数与“已排除的联系人”区域（含全部排除条目）在任何查询下
+    都不变；共享邮箱的每条记录在数据岛中各占一项，过滤后仍是独立
+    条目，CSV 顺序与同目录相对预览链接不变。
+
+    保留联系人清单按 CSV 顺序列出每条保留记录的原始姓名、邮箱及预览
+    链接；其后追加“已排除的联系人”区域，按 CSV 顺序逐条列出命中分组
+    后被排除名单（--exclude-email / --exclude-file）移除的记录（与
+    报告 excluded_contacts 同内容、同顺序，条目数等于 excluded_count；
+    未命中分组的记录不出现，共享邮箱的每条记录各列一项，重复排除值
+    不重复增加条目），每条只显示原始姓名与邮箱文字，不提供预览或
+    邮件链接；没有排除记录时显示固定空状态。姓名、邮箱的转义与表格/
+    空状态拼装由 _index_contact_row 与 _index_contact_table 统一承担，
+    两类清单不再各自维护同一套呈现逻辑；它们的差异只在调用处声明：
+    保留清单多一个“预览”表头、行上带搜索标记类，并传入同目录预览
+    文件名作为第三列相对链接与零命中搜索提示行，排除清单不传链接、
+    不带标记类。筛选值段落与两类清单的姓名、邮箱单元格带预排版类，
+    配合 head 中的本地样式块（white-space: pre-wrap，见
+    _index_style_block）在浏览器排版中按原数量保留首尾与连续的普通
+    空格 U+0020；空格不修剪、不替换为 &nbsp; 等可见标记，表头与
+    “预览”链接单元格维持普通排版。保留清单中的邮箱仅作文字展示，
+    不生成 mailto 等任何非文件链接；链接 href 只写同目录预览文件名，
+    输出目录整体移动后仍可打开。matched 为空（零命中或全部排除）时
+    保留清单区域不生成表格，固定显示“没有可预览的联系人”且不含任何
+    预览链接，搜索框仍可输入；零命中时两个空状态同时出现。文档不
+    引用任何网络资源，搜索脚本同样完全内联、无网络请求。
     """
     retained_rows = [
         _index_contact_row(
             (contact["name"], contact["email"]),
             link=preview["file"],
+            retained=True,
         )
         for contact, preview in zip(matched, previews)
     ]
     listing = _index_contact_table(
         ("姓名", "邮箱", "预览"),
         retained_rows,
-        "没有可预览的联系人",
+        INDEX_NO_PREVIEW_MESSAGE,
+        search_empty_message=INDEX_SEARCH_EMPTY_MESSAGE,
     )
 
-    # 排除区域只放文字：不传链接，故两列均为纯文本单元格，
-    # 无 a 元素、无 mailto。
+    # 排除区域只放文字：不传链接、不带搜索标记类，故两列均为纯文本
+    # 单元格，无 a 元素、无 mailto，搜索脚本也永不触及这些行。
     excluded_rows = [
         _index_contact_row((contact["name"], contact["email"]))
         for contact in excluded
@@ -308,9 +445,11 @@ def _build_index(segment, segment_count, excluded_count, matched, previews,
         f'<p class="{INDEX_FIELD_CLASS}">筛选值：{_esc(segment)}</p>\n'
         f"<p>分组命中：{segment_count}；排除：{excluded_count}；"
         f"最终预览：{len(matched)}</p>\n"
+        f"{_index_search_box()}"
         f"{listing}\n"
         "<h2>已排除的联系人</h2>\n"
         f"{excluded_listing}\n"
+        f"{_index_search_script(matched)}"
         "</body>\n"
         "</html>\n"
     )
@@ -405,11 +544,14 @@ def _build_parser():
         "--index",
         action="store_true",
         help="在输出目录额外生成 index.html：先按 CSV 顺序列出保留记录"
-        "的原始姓名、邮箱与相对预览链接，再以内容、顺序与报告 "
-        "excluded_contacts 一致的“已排除的联系人”区域逐条列出被排除"
-        "记录（仅文字，无预览或邮件链接，无排除记录时显示空状态），"
-        "并显示筛选值及分组命中、排除、最终预览三个计数；省略时不"
-        "生成该文件，其余产物逐字节不变",
+        "的原始姓名、邮箱与相对预览链接，并提供一个完全离线的搜索框"
+        "（初始为空显示全部；输入即时过滤保留行，姓名或邮箱原文包含"
+        "整个查询即显示，区分大小写、不修剪空白；非空查询零命中时"
+        "显示固定提示，清空恢复全部；搜索不改变计数与排除区域），再"
+        "以内容、顺序与报告 excluded_contacts 一致的“已排除的联系人”"
+        "区域逐条列出被排除记录（仅文字，无预览或邮件链接，无排除"
+        "记录时显示空状态），并显示筛选值及分组命中、排除、最终预览"
+        "三个计数；省略时不生成该文件，其余产物逐字节不变",
     )
     return parser
 

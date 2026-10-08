@@ -134,10 +134,16 @@ class _IndexParser(HTMLParser):
     一起核对。除单元格文本外，另按区域收集每个 td 是否带预排版类
     （retained/excluded_cell_classes，与对应单元格文本一一平行），
     并收集全部段落的 (class, 文本) 与 <style> 内的样式文本。
+
+    保留清单表体末尾的“没有符合搜索条件的联系人”提示行不是数据行
+    （<tr> 不带 retained-row 类而带固定 id，初始 hidden）：整行跳过，
+    其单元格不进 retained_cells——保留清单只收集带 retained-row 类
+    的记录行；排除区域的行本来就没有该类。
     """
 
     EXCLUDED_HEADING = "已排除的联系人"
     FIELD_CLASS = "field-value"
+    RETAINED_ROW_CLASS = "retained-row"
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -155,6 +161,9 @@ class _IndexParser(HTMLParser):
         self._in_excluded = False
         self._current_cells = None
         self._current_classes = None
+        # 当前 <tr> 是否为应收集单元格的数据行：保留表内只有带
+        # retained-row 类的行才算（搜索提示行跳过），排除表内行均算。
+        self._row_is_data = False
         self._paragraph = None
         self._style_parts = None
 
@@ -169,9 +178,17 @@ class _IndexParser(HTMLParser):
             else:
                 self._current_cells = self.retained_cells
                 self._current_classes = self.retained_cell_classes
+        elif tag == "tr":
+            row_classes = attrs_dict.get("class", "").split()
+            if self._current_cells is self.retained_cells:
+                self._row_is_data = self.RETAINED_ROW_CLASS in row_classes
+            else:
+                self._row_is_data = True
         elif tag == "td":
-            self._cell = []
-            self._cell_class = attrs_dict.get("class")
+            # 只为数据行收集单元格；搜索提示行的 td 直接忽略。
+            if self._row_is_data:
+                self._cell = []
+                self._cell_class = attrs_dict.get("class")
         elif tag == "p":
             self._paragraph = [attrs_dict.get("class"), []]
         elif tag == "style":
@@ -203,6 +220,8 @@ class _IndexParser(HTMLParser):
                 )
             self._cell = None
             self._cell_class = None
+        elif tag == "tr":
+            self._row_is_data = False
         elif tag == "p" and self._paragraph is not None:
             self.paragraphs.append(
                 (self._paragraph[0], "".join(self._paragraph[1]))
@@ -379,11 +398,14 @@ class IndexPageTestCase(unittest.TestCase):
         self.assertIn("丙&lt;丁&gt;", raw)
         self.assertNotIn("<丁>", raw)
 
-        # 邮箱仅作文字：无 mailto；页面无网络资源。
+        # 邮箱仅作文字：无 mailto；页面无网络资源。搜索脚本是唯一
+        # 例外：恰有一个无属性（无 src、无 type）的内联 <script>，
+        # 不带任何可发起请求的外部引用标记。
         self.assertNotIn("mailto:", raw)
-        for forbidden in ("http://", "https://", "src=", "<script",
+        for forbidden in ("http://", "https://", "src=", "<script ",
                           "<img", "<link"):
             self.assertNotIn(forbidden, raw)
+        self.assertEqual(raw.count("<script>"), 1)
 
     def test_default_text_acceptance_fixed_csv_excluded_region(self):
         # 用户验收固定样例（省略 --format，即默认 text）：newsletter
@@ -806,11 +828,13 @@ class IndexPageTestCase(unittest.TestCase):
                 # 中文字面显示、& 仍按 HTML 转义为 &amp;。
                 self.assertIn(" 甲  &amp;乙 ", raw)
 
-                # 页面仍仅用本地相对预览链接、无网络资源。
+                # 页面仍仅用本地相对预览链接、无网络资源。搜索脚本
+                # 是唯一例外：恰有一个无属性（无 src）的内联 script。
                 self.assertNotIn("mailto:", raw)
                 for forbidden in ("http://", "https://", "src=",
-                                  "<script", "<img", "<link"):
+                                  "<script ", "<img", "<link"):
                     self.assertNotIn(forbidden, raw)
+                self.assertEqual(raw.count("<script>"), 1)
 
                 # 相对链接指向真实存在的同目录预览文件。
                 for href in parser.links:
