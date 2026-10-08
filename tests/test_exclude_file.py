@@ -17,6 +17,13 @@ a@example.invalid，丙用 b@example.invalid，丁用 c@example.invalid，
 零预览报告；以及文件不存在、不可读、UTF-8 解码失败与参数缺值时退出 2、
 标准错误包含路径/参数名与原因、无 Traceback、不创建输出。
 
+--exclude-file 可重复提供时另覆盖：first.txt（两行甲的邮箱）与
+second.txt（甲、丁各一行）的双文件验收、交换名单顺序逐字节一致、
+text/html/--index/--manifest 全部产物与等价单文件逐字节一致、文件内、
+文件间及命令行重复值不叠加、名单中的空文件不影响其他文件、多个文件
+失败时只报告按参数出现顺序遇到的首个失败文件、即使分组零命中或受众
+已全部排除也不跳过后续文件的读取校验、重复提供时某次缺值仍退出 2。
+
 仅依赖 Python 3 标准库，完全离线；邮箱使用 RFC 2606 保留的
 example.invalid 虚构域名。
 
@@ -622,6 +629,271 @@ class ExcludeFileTestCase(unittest.TestCase):
             [item["name"] for item in report["excluded_contacts"]],
             ["甲", "乙", "丙", "丁"],
         )
+
+    def _assert_dirs_byte_identical(self, left, right):
+        """两个输出目录的文件清单与每个文件字节完全一致。"""
+        self.assertEqual(sorted(os.listdir(left)), sorted(os.listdir(right)))
+        for name in os.listdir(left):
+            with open(os.path.join(left, name), "rb") as fh:
+                left_bytes = fh.read()
+            with open(os.path.join(right, name), "rb") as fh:
+                right_bytes = fh.read()
+            self.assertEqual(left_bytes, right_bytes, msg=name)
+
+    def test_acceptance_two_exclude_files(self):
+        # 验收：first.txt 两行甲的邮箱（文件内重复），second.txt 一行甲、
+        # 一行丁；两文件与（未提供的）命令行名单合并后只排除 a@ 与 c@。
+        first_path = self._write(
+            "first.txt", EMAIL_A + "\n" + EMAIL_A + "\n"
+        )
+        second_path = self._write(
+            "second.txt", EMAIL_A + "\n" + EMAIL_C + "\n"
+        )
+        out_path = os.path.join(self.tmp, "previews")
+        result = self._run(
+            out_path,
+            ["--exclude-file", first_path,
+             "--exclude-file", second_path],
+        )
+
+        self.assertEqual(result.returncode, 0,
+                         msg=result.stderr.decode("utf-8", "replace"))
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(
+            sorted(os.listdir(out_path)),
+            ["preview-0001.txt", "report.json"],
+        )
+        with open(os.path.join(out_path, "preview-0001.txt"),
+                  "rb") as fh:
+            self.assertEqual(fh.read(), PREVIEW_BING.encode("utf-8"))
+        self._assert_acceptance_report(self._read_report(out_path))
+
+    def test_swapping_file_order_is_byte_identical(self):
+        # 交换两个名单的参数顺序不改变成功输出：合并基于去重集合，
+        # 排除明细按 CSV 顺序排列，与名单出现顺序无关。
+        first_path = self._write(
+            "first.txt", EMAIL_A + "\n" + EMAIL_A + "\n"
+        )
+        second_path = self._write(
+            "second.txt", EMAIL_A + "\n" + EMAIL_C + "\n"
+        )
+        out_ab = os.path.join(self.tmp, "out-ab")
+        result_ab = self._run(
+            out_ab,
+            ["--exclude-file", first_path,
+             "--exclude-file", second_path],
+        )
+        out_ba = os.path.join(self.tmp, "out-ba")
+        result_ba = self._run(
+            out_ba,
+            ["--exclude-file", second_path,
+             "--exclude-file", first_path],
+        )
+
+        self.assertEqual(result_ab.returncode, 0,
+                         msg=result_ab.stderr.decode("utf-8", "replace"))
+        self.assertEqual(result_ba.returncode, 0,
+                         msg=result_ba.stderr.decode("utf-8", "replace"))
+        self._assert_dirs_byte_identical(out_ab, out_ba)
+
+    def test_multiple_files_equivalent_to_single_file_all_artifacts(self):
+        # text、html、--index 与 --manifest 都使用同一合并结果：两个名单
+        # 文件的成功产物与一份等价合并单文件在每种产物组合下逐字节一致。
+        first_path = self._write(
+            "first.txt", EMAIL_A + "\n" + EMAIL_A + "\n"
+        )
+        second_path = self._write(
+            "second.txt", EMAIL_A + "\n" + EMAIL_C + "\n"
+        )
+        single_path = self._write(
+            "single.txt", EMAIL_A + "\n" + EMAIL_C + "\n"
+        )
+        flag_variants = (
+            (),
+            ("--format", "html"),
+            ("--index",),
+            ("--manifest",),
+            ("--format", "html", "--index", "--manifest"),
+        )
+        for number, flags in enumerate(flag_variants):
+            out_multi = os.path.join(self.tmp, f"out-multi-{number}")
+            result_multi = self._run(
+                out_multi,
+                ["--exclude-file", first_path,
+                 "--exclude-file", second_path, *flags],
+            )
+            out_single = os.path.join(self.tmp, f"out-single-{number}")
+            result_single = self._run(
+                out_single,
+                ["--exclude-file", single_path, *flags],
+            )
+
+            self.assertEqual(result_multi.returncode, 0,
+                             msg=result_multi.stderr.decode("utf-8", "replace"))
+            self.assertEqual(result_single.returncode, 0,
+                             msg=result_single.stderr.decode("utf-8", "replace"))
+            self._assert_dirs_byte_identical(out_multi, out_single)
+
+    def test_dedup_across_files_and_command_line(self):
+        # a@ 在 first.txt 出现两次、second.txt 出现一次、命令行再给一次，
+        # c@ 在 second.txt：文件内、文件间与命令行的重复不叠加，排除数
+        # 仍按记录为 3（甲、乙、丁）。
+        first_path = self._write(
+            "first.txt", EMAIL_A + "\n" + EMAIL_A + "\n"
+        )
+        second_path = self._write(
+            "second.txt", EMAIL_A + "\n" + EMAIL_C + "\n"
+        )
+        out_path = os.path.join(self.tmp, "out-dedupe")
+        result = self._run(
+            out_path,
+            ["--exclude-file", first_path,
+             "--exclude-file", second_path,
+             "--exclude-email", EMAIL_A],
+        )
+
+        self.assertEqual(result.returncode, 0,
+                         msg=result.stderr.decode("utf-8", "replace"))
+        self._assert_acceptance_report(self._read_report(out_path))
+
+    def test_empty_file_among_multiple_is_empty_list(self):
+        # 多名单中的空文件（或仅含空白行）视为空名单，不影响其他文件。
+        empty_path = self._write("empty.txt", "")
+        blanks_path = self._write("blanks.txt", "\n  \n\t\n")
+        second_path = self._write(
+            "second.txt", EMAIL_A + "\n" + EMAIL_C + "\n"
+        )
+        out_path = os.path.join(self.tmp, "out-empty-among")
+        result = self._run(
+            out_path,
+            ["--exclude-file", empty_path,
+             "--exclude-file", blanks_path,
+             "--exclude-file", second_path],
+        )
+
+        self.assertEqual(result.returncode, 0,
+                         msg=result.stderr.decode("utf-8", "replace"))
+        self._assert_acceptance_report(self._read_report(out_path))
+
+    def test_first_failing_file_reported_in_argument_order(self):
+        # 多个文件失败时只报告按参数出现顺序遇到的首个失败文件：
+        # 情形 A——首个文件可读、第二个不存在：点名第二个，不创建输出。
+        first_path = self._write(
+            "first.txt", EMAIL_A + "\n"
+        )
+        missing_second = os.path.join(self.tmp, "missing-second.txt")
+        out_a = os.path.join(self.tmp, "out-a")
+        result = self._run(
+            out_a,
+            ["--exclude-file", first_path,
+             "--exclude-file", missing_second],
+        )
+
+        self.assertEqual(result.returncode, 2)
+        stderr = result.stderr.decode("utf-8")
+        self.assertIn("文件不存在", stderr)
+        self.assertIn("排除名单文件", stderr)
+        self.assertIn(missing_second, stderr)
+        self.assertNotIn("Traceback (most recent call last)", stderr)
+        self.assertFalse(os.path.exists(out_a))
+
+        # 情形 B——首个不存在、第二个是非法 UTF-8：只点名首个，
+        # 不出现第二个路径。
+        bad_path = self._write_bytes("bad.txt", b"\xff")
+        out_b = os.path.join(self.tmp, "out-b")
+        result = self._run(
+            out_b,
+            ["--exclude-file", missing_second,
+             "--exclude-file", bad_path],
+        )
+
+        self.assertEqual(result.returncode, 2)
+        stderr = result.stderr.decode("utf-8")
+        self.assertIn(missing_second, stderr)
+        self.assertNotIn(bad_path, stderr)
+        self.assertNotIn("Traceback (most recent call last)", stderr)
+        self.assertFalse(os.path.exists(out_b))
+
+    def test_later_files_validated_when_audience_all_excluded_or_zero_hits(self):
+        # 即使首个名单已排除全部受众，后续文件仍必须读取校验：第二个
+        # 文件不存在时照样退出 2，不创建输出目录。
+        all_path = self._write(
+            "all.txt", EMAIL_A + "\n" + EMAIL_B + "\n" + EMAIL_C + "\n"
+        )
+        missing_path = os.path.join(self.tmp, "missing-later.txt")
+        out_path = os.path.join(self.tmp, "out-all-excluded")
+        result = self._run(
+            out_path,
+            ["--exclude-file", all_path,
+             "--exclude-file", missing_path],
+        )
+
+        self.assertEqual(result.returncode, 2)
+        stderr = result.stderr.decode("utf-8")
+        self.assertIn(missing_path, stderr)
+        self.assertNotIn("Traceback (most recent call last)", stderr)
+        self.assertFalse(os.path.exists(out_path))
+
+        # 空名单 + 缺失的后续文件，分组本身零命中：同样失败。
+        empty_path = self._write("empty.txt", "")
+        out_zero = os.path.join(self.tmp, "out-zero-later")
+        result = self._run(
+            out_zero,
+            ["--exclude-file", empty_path,
+             "--exclude-file", missing_path],
+            segment="no-such-segment",
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(missing_path, result.stderr.decode("utf-8"))
+        self.assertFalse(os.path.exists(out_zero))
+
+        # 已存在的空目录在多名单失败后仍为空。
+        out_empty = os.path.join(self.tmp, "out-empty-later")
+        os.mkdir(out_empty)
+        result = self._run(
+            out_empty,
+            ["--exclude-file", all_path,
+             "--exclude-file", missing_path],
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(os.listdir(out_empty), [])
+
+    def test_later_invalid_utf8_file_exits_2(self):
+        # 首个文件正常、第二个文件含非法 UTF-8：退出 2 并点名第二个文件，
+        # 无 Traceback，不创建输出。
+        first_path = self._write("first.txt", EMAIL_A + "\n")
+        bad_path = self._write_bytes("bad-second.txt", b"\xff")
+        out_path = os.path.join(self.tmp, "out-bad-second")
+        result = self._run(
+            out_path,
+            ["--exclude-file", first_path,
+             "--exclude-file", bad_path],
+        )
+
+        self.assertEqual(result.returncode, 2)
+        stderr = result.stderr.decode("utf-8")
+        self.assertIn("无法解码", stderr)
+        self.assertIn("排除名单文件", stderr)
+        self.assertIn(bad_path, stderr)
+        self.assertIn("UTF-8", stderr)
+        self.assertNotIn("Traceback (most recent call last)", stderr)
+        self.assertFalse(os.path.exists(out_path))
+
+    def test_missing_value_for_repeated_exclude_file_exits_2(self):
+        # 重复提供时最后一次 --exclude-file 缺值：argparse 同样退出 2 并
+        # 点名该参数，无 Traceback，不创建输出目录。
+        first_path = self._write("first.txt", EMAIL_A + "\n")
+        out_path = os.path.join(self.tmp, "out-missing-repeat-value")
+        result = self._run(
+            out_path,
+            ["--exclude-file", first_path, "--exclude-file"],
+        )
+
+        self.assertEqual(result.returncode, 2)
+        stderr = result.stderr.decode("utf-8")
+        self.assertIn("--exclude-file", stderr)
+        self.assertNotIn("Traceback (most recent call last)", stderr)
+        self.assertFalse(os.path.exists(out_path))
 
     def test_omitting_flag_is_byte_identical_to_baseline(self):
         # 省略 --exclude-file 与不传任何排除参数的两次运行逐字节一致。
