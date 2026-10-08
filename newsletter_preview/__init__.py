@@ -595,12 +595,16 @@ def _build_parser():
     )
     parser.add_argument(
         "--exclude-file",
+        action="append",
         metavar="FILE",
         default=None,
         help="从 UTF-8 本地名单文件追加排除邮箱（无表头，每行一个）："
         "支持 LF 与 CRLF 行结束及末行无换行；空行及仅含空白的行忽略，"
         "其余行只移除行结束符，保留大小写与首尾空白；空文件视为空名单。"
-        "名单与 --exclude-email 合并后按邮箱原文精确匹配，重复值不叠加",
+        "可重复提供以合并多份名单（按参数出现顺序逐个读取校验，"
+        "全部成功后才创建输出目录；任一文件失败即退出 2，只报告首个"
+        "失败文件）。全部名单与 --exclude-email 合并后按邮箱原文精确"
+        "匹配，重复值不叠加",
     )
     parser.add_argument(
         "--format",
@@ -645,12 +649,13 @@ def _build_parser():
 def main(argv=None):
     args = _build_parser().parse_args(argv)
     try:
-        # 先完整校验全部输入（含未匹配行、名单文件），失败时不创建任何输出。
-        file_excludes = (
-            _read_exclude_list(args.exclude_file)
-            if args.exclude_file is not None
-            else []
-        )
+        # 先完整校验全部输入（含未匹配行、全部名单文件），失败时不创建
+        # 任何输出。多份名单按参数出现顺序逐个读取：任一文件失败即抛出，
+        # 只报告首个失败文件，后续文件不再读取；即使分组零命中或受众已
+        # 被全部排除，此处的读取校验也不会跳过。
+        file_excludes = []
+        for exclude_path in args.exclude_file or ():
+            file_excludes.extend(_read_exclude_list(exclude_path))
         excluded_emails = _normalize_excludes(
             args.exclude_email, file_excludes
         )
