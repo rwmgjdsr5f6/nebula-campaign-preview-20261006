@@ -165,3 +165,43 @@ python -m unittest discover -s tests
   管理员权限、真实权限变更、磁盘耗尽或平台专用接口，Windows 与
   Linux 上核心用例均不跳过。
 
+## `--manifest` 离线核对清单（`test_manifest.py`）
+
+- 四条合成记录验收：甲、乙共用 `a@example.invalid` 且都属 newsletter，
+  丙用 `b@example.invalid` 属 newsletter，丁用 `d@example.invalid` 属
+  archive；模板“你好，{{name}}！”以 LF 结束。命令增加
+  `--exclude-email b@example.invalid --manifest --index` 后退出 0、
+  stdout/stderr 为空，目录恰含两份连续编号预览、`report.json`、
+  `index.html` 与 `manifest.csv`；报告分组命中、排除、最终预览依次为
+  3、1、2。
+- 清单为无 BOM 的 UTF-8 CSV，首行固定 `name,email,segment,
+  preview_file`，随后按 CSV 顺序只列甲、乙两条（共享邮箱各占一行），
+  第四列分别为 `preview-0001.txt`、`preview-0002.txt`，与报告
+  `previews` 逐条对应（邮箱、文件名、行数与 `matched_count` 一致）；
+  丙（被排除）与丁（未命中）不在清单中。`--format html` 时仅第四列
+  与预览扩展名改为 `.html`，其余映射不变。
+- 零命中与全部排除（再排除共享邮箱）均退出 0，清单逐字节仅为
+  `name,email,segment,preview_file\n`；全部排除时报告计数为 3、3、0、
+  排除明细按 CSV 顺序列甲、乙、丙。`--manifest` 不依赖 `--index`：
+  不带 `--index` 时只多清单、不生成索引页。省略 `--manifest` 时不
+  生成清单，且两份预览、`report.json`、`index.html` 与开启时逐字节
+  一致。
+- 特殊字符往返：合成记录的姓名、邮箱、segment 携带首尾与连续空格、
+  逗号、双引号、字段内 LF、孤立 CR 与 CRLF、中文、大小写及
+  `{{name}}` 样式文字（segment 本身含逗号），落盘清单无 BOM、相关
+  字段经引号/转义，以 `csv.reader` 重新解析后四列逐字等于原值；该
+  字段值中的 `{{name}}` 在预览正文中按字面保留、不被二次替换。
+- 写入失败两阶段（各覆盖默认文本与 `--format html`）：目标
+  `manifest.csv` 的 `open` 在创建前抛
+  `PermissionError("manifest-write-denied")`（清单不存在），或 open
+  成功后的第一次正文 `write` 在写入任何字节前抛
+  `OSError("manifest-body-write-denied")`（清单存在但零字节）。均
+  退出 2、stdout 为空，stderr 含“无法写入输出文件”、清单完整路径
+  与原因、无 Traceback；两份预览与完整报告保留且与对照逐字节一致、
+  不回滚；索引页在清单之后写出，故两种故障下 `index.html` 均不存在。
+- 输入校验失败（缺 `segment` 列）退出 2、不创建输出目录；输出目录
+  非空时退出 2、原有文件保留且不生成清单。注入机制与前述写入失败
+  测试相同（`sitecustomize.py` 包装 `builtins.open`，环境变量传入
+  目标路径与故障阶段），纯标准库、跨平台、核心用例不跳过。
+
+

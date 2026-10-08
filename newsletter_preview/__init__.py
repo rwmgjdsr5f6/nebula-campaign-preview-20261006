@@ -17,6 +17,10 @@ import sys
 REQUIRED_COLUMNS = ("name", "email", "segment")
 KNOWN_PLACEHOLDERS = ("name", "email", "segment")
 OUTPUT_FORMATS = ("text", "html")
+# --manifest 导出的核对清单文件名与固定表头。清单为无 BOM 的 UTF-8 CSV，
+# 首行逐字为该表头，之后每行对应一条已生成预览的保留联系人记录。
+MANIFEST_FILENAME = "manifest.csv"
+MANIFEST_HEADER = ("name", "email", "segment", "preview_file")
 # 完整双花括号占位符，如 {{name}}；不完整的（如单个 { 或未闭合）按普通文字处理。
 PLACEHOLDER_RE = re.compile(r"\{\{([^{}]*)\}\}")
 # UTF-8 BOM（字节 EF BB BF）解码后的字符。仅联系人 CSV 文件开头的一个
@@ -517,6 +521,34 @@ def _write_file(path, content):
         raise InputError(f"无法写入输出文件：{path}：{exc}")
 
 
+def _build_manifest(matched, previews):
+    """构建离线核对清单 CSV 文本（无 BOM 的 UTF-8，首行固定表头）。
+
+    matched 与 previews 按 CSV 顺序一一平行：后者即 report.json 的
+    previews 清单，故本清单每一行对应一条已生成预览的保留联系人记录，
+    第四列与报告 previews[i]["file"] 逐条相同（text 格式为 .txt、html
+    格式为 .html）。前三列写输入 CSV 的 name、email、segment 原文：
+    保留中文、大小写、首尾空白与连续空格；字段中的逗号、双引号与字段
+    内换行由 csv 模块按 RFC 4180 加引号/转义，重新解析后逐字恢复原值，
+    {{name}} 样式文字同样原样保留。写入经 newline="" 且行结束符固定为
+    LF，不产生 BOM，也不做任何平台换行转换；零命中或全部排除时
+    matched 为空，文本只含首行表头加一个 LF。
+    """
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(MANIFEST_HEADER)
+    for contact, preview in zip(matched, previews):
+        writer.writerow(
+            (
+                contact["name"],
+                contact["email"],
+                contact["segment"],
+                preview["file"],
+            )
+        )
+    return buffer.getvalue()
+
+
 def _normalize_excludes(cli_values, file_values):
     """校验并合并 --exclude-email 与 --exclude-file 的值，返回去重后的原值集合。
 
@@ -585,6 +617,19 @@ def _build_parser():
         "记录时显示空状态），并显示筛选值及分组命中、排除、最终预览"
         "三个计数；省略时不生成该文件，其余产物逐字节不变",
     )
+    parser.add_argument(
+        "--manifest",
+        action="store_true",
+        help="在输出目录额外生成 manifest.csv：无 BOM 的 UTF-8 离线核对"
+        "清单，首行固定为 name,email,segment,preview_file，其后每行对应"
+        "一条已生成预览的保留联系人（按 CSV 顺序，共享邮箱各占一行）；"
+        "前三列保存输入 CSV 对应字段原文（保留中文、大小写、首尾空白与"
+        "连续空格，逗号、双引号与字段内换行经 CSV 转义后可恢复原值），"
+        "第四列只写同目录预览文件名，与 report.json 的 previews 逐条对应"
+        "（text 为 .txt，html 为 .html）；未命中分组或被任一排除来源移除"
+        "的记录不进入清单，零命中或全部排除时仅含表头。省略时不生成该"
+        "文件，其余产物逐字节不变",
+    )
     return parser
 
 
@@ -645,8 +690,16 @@ def main(argv=None):
             os.path.join(args.out, "report.json"),
             json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         )
-        # 索引页最后写出：未开启 --index 时不走此步，已有预览与报告
-        # 与未开启时逐字节一致；写入失败同样退出 2，已写出的文件保留。
+        # 核对清单在报告之后、索引页之前写出：未开启 --manifest 时不走
+        # 此步，已有预览、报告与索引页与未开启时逐字节一致；写入失败同样
+        # 退出 2，已写出的文件保留。清单与报告 previews 同源同顺序。
+        if args.manifest:
+            _write_file(
+                os.path.join(args.out, MANIFEST_FILENAME),
+                _build_manifest(matched, previews),
+            )
+        # 索引页最后写出：未开启 --index 时不走此步，已有预览、报告与
+        # 清单与未开启时逐字节一致；写入失败同样退出 2，已写出的文件保留。
         if args.index:
             _write_file(
                 os.path.join(args.out, "index.html"),
