@@ -140,3 +140,25 @@ python -m unittest discover -s tests
   不需要管理员权限、不修改真实目录权限、不耗尽磁盘空间，也不依赖
   RLIMIT 等平台专用接口，核心用例在 Windows 与 Linux 上都不跳过。
 
+## report.json 创建成功后正文写入失败（`test_report_body_write_failure.py`）
+
+- 固定合成输入与命令同 `test_report_write_failure.py`：contacts.csv 表头
+  `name,email,segment`，数据行 甲/a@example.invalid/newsletter 与
+  乙/b@example.invalid/newsletter；template.txt 为“你好，{{name}}！”
+  并以一个 LF 结束；开启 `--index`，覆盖默认文本格式与 `--format html`。
+- 每种格式先跑无故障对照：退出 0、stdout/stderr 为空，目录恰好含两份
+  连续编号预览、`report.json` 与 `index.html`；报告计数 2、0、2，
+  排除明细为空，预览清单按甲、乙顺序对应邮箱与实际扩展名。
+- 随后在相同输入的新输出目录中注入故障：目标 `report.json` 的 `open`
+  照常成功（文件被创建），但返回文件对象的第一次正文 `write` 在写入
+  任何字节前抛出 `OSError("report-body-write-denied")`（其余文件操作
+  正常）。预期退出 2、stdout 为空，stderr 包含 report.json 完整路径与
+  该原因、无 Traceback；两份预览完整保留且与同格式对照逐字节一致，
+  `report.json` 存在但为零字节，`index.html` 不存在（报告之后才写出，
+  未执行到），目录无其他新增文件；固定输入文件逐字节不变。
+- 注入机制同为纯标准库、跨平台的 `sitecustomize.py`：对目标路径的
+  `open` 原样转发，只把返回的真实文件对象包一层代理，仅拦截第一次
+  `write`/`writelines` 并在转发前抛错，其余属性与上下文管理原样委托；
+  不依赖管理员权限、真实权限变更、磁盘耗尽或平台专用接口，Windows 与
+  Linux 上核心用例均不跳过。
+
